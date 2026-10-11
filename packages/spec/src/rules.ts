@@ -12,7 +12,7 @@ const seeds: Seed[] = [
     enforcement: "Structural: the tenant resolver accepts only host and session inputs. Verified by canary scenario.",
     tier: "invariant",
     principle: 1,
-    oracle: "canary",
+    oracle: "differential",
     scenario: "tenant-isolation/identity-from-host-or-session-only",
   },
   {

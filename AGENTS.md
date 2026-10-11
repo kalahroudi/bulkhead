@@ -20,11 +20,13 @@ Bulkhead turns a Cloudflare Workers project into a multi-tenant service, with se
 
 ## Current state
 
-Phase 0 (foundation) only. Do not start Phase 1 until the human signs off on Phase 0.
+Phase 0 is accepted (DR-0003). Phase 1 (verify, fixture app, event log, watch) is in review. Do not start Phase 2 until the human signs off on Phase 1.
 
 ## Commands
 
 - `pnpm gate:phase0`: typecheck, tests, spec lint, and check that `SPEC.md` matches the catalog.
+- `pnpm gate:phase1`: phase 0 gate plus the verify self-check (all seeded bugs caught, no false positives).
+- `node packages/plane/src/cli.ts [--once] [--log-dir .bulkhead]`: terminal view of the event log.
 - `pnpm --filter @kalahroudi/bulkhead-spec catalog`: regenerate `SPEC.md`.
 
 ## Naming

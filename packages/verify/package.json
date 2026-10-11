@@ -1,0 +1,22 @@
+{
+  "name": "@kalahroudi/bulkhead-verify",
+  "version": "0.0.0",
+  "description": "Black-box oracle for Bulkhead. Talks to the running app over HTTP only; never imports core.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "bulkhead-verify": "./src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "selfcheck": "node src/cli.ts selfcheck"
+  },
+  "dependencies": {
+    "@kalahroudi/bulkhead-spec": "workspace:*"
+  },
+  "exports": {
+    "./eventlog": "./src/eventlog.ts",
+    "./run": "./src/run.ts"
+  }
+}
