@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { seededBugs } from "../src/bugs.ts";
 import { EventLog } from "../src/eventlog.ts";
-import { runProbes, selfCheck, startFixture, verifyTarget } from "../src/run.ts";
+import { runProbes, selectProbes, selfCheck, startFixture, verifyTarget } from "../src/run.ts";
 import { checkTarget } from "../src/targets.ts";
 import { probes } from "../src/probes.ts";
 import { spec } from "@kalahroudi/bulkhead-spec";
@@ -35,6 +35,13 @@ test("with every bug present, exactly the cataloged probes fail", async () => {
   } finally {
     await fx.stop();
   }
+});
+
+test("the rule filter refuses unknown ids and refuses to run nothing", () => {
+  assert.throws(() => selectProbes(["TENANT-9"]), /unknown rule id/);
+  assert.throws(() => selectProbes([]), /no probes selected/);
+  assert.deepEqual(selectProbes(["TENANT-1"]).map((p) => p.id), ["identity-header-differential"]);
+  assert.equal(selectProbes().length, probes.length);
 });
 
 test("verifyTarget records confirmed findings and events against a vulnerable target", async () => {

@@ -20,7 +20,7 @@ Bulkhead turns a Cloudflare Workers project into a multi-tenant service, with se
 
 ## Current state
 
-Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 (tenant and API kernel in `packages/core`, demo Worker in `examples/demo-app`) is in review. Do not start Phase 3 until the human signs off on Phase 2.
+Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) has not started.
 
 ## Commands
 

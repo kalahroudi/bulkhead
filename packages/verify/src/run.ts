@@ -107,9 +107,23 @@ export interface RunReport {
   selfCheck: SelfCheck;
 }
 
+/**
+ * Rule filter for a targeted run. Unknown IDs and an empty selection are refused outright: a typo
+ * must not silently narrow the run to nothing and hand back a green report.
+ */
+export function selectProbes(rules?: readonly string[]): Probe[] {
+  if (rules === undefined) return probes;
+  const known = new Set(probes.map((p) => p.ruleId));
+  const unknown = [...new Set(rules)].filter((r) => !known.has(r));
+  if (unknown.length) throw new Error(`unknown rule id(s): ${unknown.join(", ")}`);
+  const selected = probes.filter((p) => rules.includes(p.ruleId));
+  if (!selected.length) throw new Error("no probes selected");
+  return selected;
+}
+
 /** Self-check first (the run is invalid if it fails), then the probes against the target. Events go to the log. */
 export async function verifyTarget(target: URL, log: EventLog, rules?: readonly string[]): Promise<RunReport> {
-  const selected = rules ? probes.filter((p) => rules.includes(p.ruleId)) : probes;
+  const selected = selectProbes(rules);
   const skipped = probes.filter((p) => !selected.includes(p));
   log.append("verify.run", { phase: "started", target: target.host, verifyVersion: VERIFY_VERSION });
   const sc = await selfCheck();

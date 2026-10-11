@@ -52,7 +52,6 @@ export function createApp(options: AppOptions = {}) {
   });
 
   function route(method: Method, path: string, policy: Policy, handler: Handler) {
-    if (!METHODS.includes(method)) throw new PolicyError(`unsupported method ${String(method)}`);
     const checked = validatePolicy(method, path, policy); // throws at startup, before the route exists
     if (manifest.some((m) => m.method === method && m.path === path)) throw new PolicyError(`${method} ${path}: registered twice`);
     manifest.push(toManifestEntry(method, path, checked));

@@ -2,7 +2,7 @@
 import { parseArgs } from "node:util";
 import { spec } from "@kalahroudi/bulkhead-spec";
 import { EventLog } from "./eventlog.ts";
-import { LIMITS, selfCheck, verifyTarget } from "./run.ts";
+import { LIMITS, selectProbes, selfCheck, verifyTarget } from "./run.ts";
 import { probes } from "./probes.ts";
 import { checkTarget } from "./targets.ts";
 
@@ -30,7 +30,9 @@ if (cmd === "selfcheck") {
   const target = new URL(values.target);
   const allowed = checkTarget(target, dir);
   if (!allowed.ok) { console.error(`refused: ${allowed.reason}`); process.exit(2); }
-  const report = await verifyTarget(target, new EventLog(dir, "verify"), values.rules?.split(","));
+  const rules = values.rules?.split(",");
+  try { selectProbes(rules); } catch (e) { console.error(`refused: ${(e as Error).message}`); process.exit(2); }
+  const report = await verifyTarget(target, new EventLog(dir, "verify"), rules);
   if (!report.valid) { console.error("run INVALID: oracle self-check failed"); process.exit(1); }
   for (const r of report.results) console.log(`${r.passed ? "pass" : "FAIL"} ${r.probe.ruleId} ${r.probe.id}${r.passed ? "" : `: ${r.evidence}`}`);
   if (report.skipped.length) console.log(`Skipped by rule filter: ${report.skipped.map((p) => `${p.ruleId} ${p.id}`).join(", ")}`);
