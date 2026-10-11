@@ -6,8 +6,10 @@ export type Role = (typeof ROLES)[number];
  * or declaring neither/both of `role` and `public`, is a registration error (ROUTE-1, AUTH-1).
  */
 export type Policy =
-  | { role: Role; feature?: string; public?: never }
-  | { public: { reason: string }; role?: never; feature?: never };
+  | { role: Role; feature?: string; permission?: string; public?: never }
+  | { public: { reason: string }; role?: never; feature?: never; permission?: never };
+
+const PERMISSION = /^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/;
 
 export class PolicyError extends Error {}
 
@@ -21,10 +23,12 @@ export function validatePolicy(method: string, path: string, policy: unknown): P
   if (hasRole) {
     if (!ROLES.includes(p.role as Role)) throw new PolicyError(`${where}: unknown role ${String(p.role)}`);
     if (p.feature !== undefined && (typeof p.feature !== "string" || !p.feature)) throw new PolicyError(`${where}: feature must be a non-empty string`);
+    if (p.permission !== undefined && (typeof p.permission !== "string" || !PERMISSION.test(p.permission))) throw new PolicyError(`${where}: permission must look like "area:action"`);
   } else {
     const reason = (p.public as { reason?: unknown } | null)?.reason;
     if (typeof reason !== "string" || !reason.trim()) throw new PolicyError(`${where}: public routes need a reason`);
     if (p.feature !== undefined) throw new PolicyError(`${where}: public routes cannot require a feature`);
+    if (p.permission !== undefined) throw new PolicyError(`${where}: public routes cannot require a permission`);
   }
   return policy as Policy;
 }
@@ -34,9 +38,9 @@ export const roleAtLeast = (have: Role, need: Role) => ROLES.indexOf(have) >= RO
 export interface ManifestEntry {
   method: string;
   path: string;
-  access: { kind: "public"; reason: string } | { kind: "role"; role: Role; feature?: string };
+  access: { kind: "public"; reason: string } | { kind: "role"; role: Role; feature?: string; permission?: string };
 }
 
 export function toManifestEntry(method: string, path: string, p: Policy): ManifestEntry {
-  return { method, path, access: p.public ? { kind: "public", reason: p.public.reason } : { kind: "role", role: p.role!, ...(p.feature ? { feature: p.feature } : {}) } };
+  return { method, path, access: p.public ? { kind: "public", reason: p.public.reason } : { kind: "role", role: p.role!, ...(p.feature ? { feature: p.feature } : {}), ...(p.permission ? { permission: p.permission } : {}) } };
 }

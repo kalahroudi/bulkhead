@@ -32,7 +32,7 @@ if (cmd === "selfcheck") {
   if (!allowed.ok) { console.error(`refused: ${allowed.reason}`); process.exit(2); }
   const rules = values.rules?.split(",");
   try { selectProbes(rules); } catch (e) { console.error(`refused: ${(e as Error).message}`); process.exit(2); }
-  const report = await verifyTarget(target, new EventLog(dir, "verify"), rules);
+  const report = await verifyTarget(target, new EventLog(dir, "verify"), rules, process.env.BULKHEAD_VERIFY_BOOTSTRAP_TOKEN);
   if (!report.valid) { console.error("run INVALID: oracle self-check failed"); process.exit(1); }
   for (const r of report.results) console.log(`${r.passed ? "pass" : "FAIL"} ${r.probe.ruleId} ${r.probe.id}${r.passed ? "" : `: ${r.evidence}`}`);
   if (report.skipped.length) console.log(`Skipped by rule filter: ${report.skipped.map((p) => `${p.ruleId} ${p.id}`).join(", ")}`);

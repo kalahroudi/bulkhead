@@ -13,7 +13,8 @@
     "spec:lint": "pnpm --filter @kalahroudi/bulkhead-spec lint",
     "gate:phase0": "pnpm typecheck && pnpm test && pnpm spec:lint && pnpm --filter @kalahroudi/bulkhead-spec catalog:check",
     "gate:phase1": "pnpm gate:phase0 && pnpm --filter @kalahroudi/bulkhead-verify selfcheck",
-    "gate:phase2": "pnpm gate:phase1 && pnpm --filter bulkhead-demo-app manifest:check && node scripts/verify-kernel.ts"
+    "gate:phase2": "pnpm gate:phase1 && pnpm --filter bulkhead-demo-app manifest:check && node scripts/verify-kernel.ts",
+    "gate:phase3": "pnpm gate:phase2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

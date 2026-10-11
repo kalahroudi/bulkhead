@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { Oracle } from "@kalahroudi/bulkhead-spec";
 import type { Requester, Response } from "./http.ts";
-import { canaryOracle, differentialOracle, metamorphicOracle, specOracle, type Verdict } from "./oracles.ts";
+import { canaryOracle, differentialOracle, metamorphicOracle, roleDifferentialOracle, specOracle, type Verdict } from "./oracles.ts";
 
 export interface Context {
   req: Requester;
@@ -9,6 +9,8 @@ export interface Context {
   host: (tenant: string) => string;
   /** Webhook secret for the registered test environment. */
   webhookSecret: string;
+  /** First-owner bootstrap secret of the registered test environment. Undefined makes the auth probes fail loudly, never pass. */
+  bootstrapToken: string | undefined;
 }
 
 export interface Probe {
@@ -31,6 +33,37 @@ const json = (o: unknown) => JSON.stringify(o);
 function requireSetup(res: Response, what: string, reproduction: string): (Verdict & { reproduction: string }) | null {
   if (res.status >= 200 && res.status < 300) return null;
   return { passed: false, evidence: `${what} did not succeed: HTTP ${res.status} ${res.body}`, reproduction };
+}
+
+const PASSWORD = "verify-probe-password-1";
+const SESSION_COOKIE = "__Host-bk_session";
+const setCookies = (r: Response): string[] => [r.headers["set-cookie"] ?? []].flat();
+const sessionOf = (r: Response) => setCookies(r).map((c) => new RegExp(`^${SESSION_COOKIE}=([^;]+)`).exec(c)?.[1]).find(Boolean);
+const withCookie = (token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}` } });
+const fail = (evidence: string, reproduction: string) => ({ passed: false, evidence, reproduction });
+
+/** A throwaway tenant with an owner who is signed in. Every step must succeed or the probe fails (setup is not a pass). */
+async function ownerTenant({ req, host, bootstrapToken }: Context, name: string, reproduction: string) {
+  if (!bootstrapToken) return { error: fail("no bootstrap token configured for this target (set BULKHEAD_VERIFY_BOOTSTRAP_TOKEN); auth probes cannot run", reproduction) };
+  const h = host(`${name}-${randomBytes(3).toString("hex")}`);
+  const boot = await req(h, "POST", "/auth/bootstrap", { body: json({ token: bootstrapToken, email: "owner@probe.test", password: PASSWORD }) });
+  const brokenBoot = requireSetup(boot, `bootstrapping an owner on ${h}`, reproduction);
+  if (brokenBoot) return { error: brokenBoot };
+  const login = await req(h, "POST", "/auth/login", { body: json({ email: "owner@probe.test", password: PASSWORD }) });
+  const brokenLogin = requireSetup(login, "owner login", reproduction);
+  const token = sessionOf(login);
+  if (brokenLogin || !token) return { error: brokenLogin ?? fail("owner login set no session cookie", reproduction) };
+  const addUser = async (email: string, role: string) => {
+    const r = await req(h, "POST", "/users", { ...withCookie(token), body: json({ email, password: PASSWORD, role }) });
+    const broken = requireSetup(r, `creating ${role} ${email}`, reproduction);
+    return broken ? { error: broken } : { id: (JSON.parse(r.body) as { id: string }).id };
+  };
+  const loginAs = async (email: string) => {
+    const r = await req(h, "POST", "/auth/login", { body: json({ email, password: PASSWORD }) });
+    const t = sessionOf(r);
+    return r.status === 200 && t ? { token: t, res: r } : { error: fail(`login as ${email} did not succeed: HTTP ${r.status} ${r.body}`, reproduction) };
+  };
+  return { h, token, addUser, loginAs, ctx: { req } };
 }
 
 export const probes: Probe[] = [
@@ -126,6 +159,199 @@ export const probes: Probe[] = [
           { name: "genuine webhook still accepted", ok: genuine.status === 200, detail: `HTTP ${genuine.status}` },
         ]),
         reproduction: `POST /webhooks/billing {"plan":"pro"} to Host: ${t} signed with a wrong key. Expect a 4xx and GET /plan to remain "free". Replay and out-of-order delivery are not yet probed.`,
+      };
+    },
+  },
+  {
+    id: "no-default-role",
+    ruleId: "AUTH-1",
+    scenario: "auth/no-default-role",
+    oracle: "differential",
+    async run({ req, host }) {
+      const h = host("authz-none");
+      const reproduction = `GET /private/member on ${h} with no credential, then with a forged session cookie, then with a forged bearer key. All three must be 401 and identical.`;
+      const none = await req(h, "GET", "/private/member");
+      const cookie = await req(h, "GET", "/private/member", withCookie(`bks_${"A".repeat(43)}`));
+      const bearer = await req(h, "GET", "/private/member", { headers: { authorization: `Bearer bkk_${"0".repeat(16)}_${"A".repeat(43)}` } });
+      for (const [what, r] of [["no credential", none], ["a forged cookie", cookie], ["a forged bearer key", bearer]] as const)
+        if (r.status !== 401) return fail(`${what} was not denied: HTTP ${r.status} ${r.body}`, reproduction);
+      const a = differentialOracle(none, cookie, "no credential vs forged cookie");
+      return a.passed ? { ...differentialOracle(none, bearer, "no credential vs forged bearer"), reproduction } : { ...a, reproduction };
+    },
+  },
+  {
+    id: "session-rotation",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "Log in presenting an attacker-chosen session cookie; the issued session must differ from it. Log in again presenting the first session; it must stop working.";
+      const t = await ownerTenant(ctx, "rot", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token } = t as Extract<typeof t, { h: string }>;
+      const chosen = `bks_${"B".repeat(43)}`;
+      const fixated = await req(h, "POST", "/auth/login", { ...withCookie(chosen), body: json({ email: "owner@probe.test", password: PASSWORD }) });
+      const issued = sessionOf(fixated);
+      const second = await req(h, "POST", "/auth/login", { ...withCookie(token), body: json({ email: "owner@probe.test", password: PASSWORD }) });
+      const rotated = sessionOf(second);
+      const oldNow = await req(h, "GET", "/private/member", withCookie(token));
+      const newNow = rotated ? await req(h, "GET", "/private/member", withCookie(rotated)) : undefined;
+      return {
+        ...specOracle([
+          { name: "login ignores a client-chosen session token", ok: !!issued && issued !== chosen, detail: `issued ${issued ?? "none"}` },
+          { name: "login while holding a session issues a different one", ok: !!rotated && rotated !== token, detail: `rotated ${rotated ?? "none"}` },
+          { name: "the presented session no longer works after login", ok: oldNow.status === 401, detail: `HTTP ${oldNow.status}` },
+          { name: "the new session works", ok: newNow?.status === 200, detail: `HTTP ${newNow?.status}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "cookie-flags",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const reproduction = "Log in and inspect Set-Cookie: it must be Secure, HttpOnly, Path=/ and carry no Domain attribute (host-only).";
+      const t = await ownerTenant(ctx, "flags", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, loginAs } = t as Extract<typeof t, { h: string }>;
+      const login = await loginAs("owner@probe.test");
+      if ("error" in login) return login.error!;
+      const cookie = setCookies(login.res).find((c) => c.startsWith(`${SESSION_COOKIE}=`)) ?? "";
+      const attrs = cookie.split(";").slice(1).map((a) => a.trim().toLowerCase());
+      return {
+        ...specOracle([
+          { name: "Secure", ok: attrs.includes("secure"), detail: cookie },
+          { name: "HttpOnly", ok: attrs.includes("httponly"), detail: cookie },
+          { name: "Path=/", ok: attrs.includes("path=/"), detail: cookie },
+          { name: "no Domain attribute (host-only)", ok: !attrs.some((a) => a.startsWith("domain=")), detail: cookie },
+          { name: "SameSite set", ok: attrs.some((a) => /^samesite=(lax|strict)$/.test(a)), detail: cookie },
+        ]),
+        reproduction: `${reproduction} (tenant ${h})`,
+      };
+    },
+  },
+  {
+    id: "logout-revokes",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "Log in, GET /private/member (200), POST /auth/logout, then GET /private/member with the same cookie: it must be 401.";
+      const t = await ownerTenant(ctx, "logout", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token } = t as Extract<typeof t, { h: string }>;
+      const before = await req(h, "GET", "/private/member", withCookie(token));
+      const out = await req(h, "POST", "/auth/logout", withCookie(token));
+      const after = await req(h, "GET", "/private/member", withCookie(token));
+      return {
+        ...specOracle([
+          { name: "session worked before logout", ok: before.status === 200, detail: `HTTP ${before.status}` },
+          { name: "logout succeeds", ok: out.status === 200, detail: `HTTP ${out.status}` },
+          { name: "session is dead after logout", ok: after.status === 401, detail: `HTTP ${after.status} ${after.body}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "role-change-revokes",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "Create a member, log them in, have the owner change their role to admin, then use the member's old cookie: it must be 401.";
+      const t = await ownerTenant(ctx, "rolechg", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token, addUser, loginAs } = t as Extract<typeof t, { h: string }>;
+      const added = await addUser("m@probe.test", "member");
+      if ("error" in added) return added.error!;
+      const m = await loginAs("m@probe.test");
+      if ("error" in m) return m.error!;
+      const before = await req(h, "GET", "/private/member", withCookie(m.token));
+      const changed = await req(h, "PATCH", `/users/${added.id}/role`, { ...withCookie(token), body: json({ role: "admin" }) });
+      const after = await req(h, "GET", "/private/member", withCookie(m.token));
+      return {
+        ...specOracle([
+          { name: "member session worked", ok: before.status === 200, detail: `HTTP ${before.status}` },
+          { name: "role change accepted", ok: changed.status === 200, detail: `HTTP ${changed.status} ${changed.body}` },
+          { name: "old session is dead after role change", ok: after.status === 401, detail: `HTTP ${after.status}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "role-matrix",
+    ruleId: "AUTH-3",
+    scenario: "auth/role-differential",
+    oracle: "differential",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "Sign in as owner, admin and member on one tenant and GET /private/member, /private/admin, /private/owner. Outcomes must match the route policies (member: 200/403/403, admin: 200/200/403, owner: 200/200/200).";
+      const t = await ownerTenant(ctx, "matrix", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token, addUser, loginAs } = t as Extract<typeof t, { h: string }>;
+      const sessions: Record<string, string> = { owner: token };
+      for (const role of ["admin", "member"]) {
+        const added = await addUser(`${role}@probe.test`, role);
+        if ("error" in added) return added.error!;
+        const l = await loginAs(`${role}@probe.test`);
+        if ("error" in l) return l.error!;
+        sessions[role] = l.token;
+      }
+      const routes = ["/private/member", "/private/admin", "/private/owner"];
+      const observed: Record<string, Record<string, number>> = {};
+      for (const [actor, tok] of Object.entries(sessions)) {
+        observed[actor] = {};
+        for (const route of routes) observed[actor][route] = (await req(h, "GET", route, withCookie(tok))).status;
+      }
+      const allow = (...r: boolean[]) => Object.fromEntries(routes.map((route, i) => [route, r[i] as boolean]));
+      return { ...roleDifferentialOracle(observed, { member: allow(true, false, false), admin: allow(true, true, false), owner: allow(true, true, true) }), reproduction };
+    },
+  },
+  {
+    id: "api-key-scope",
+    ruleId: "AUTH-4",
+    scenario: "auth/api-key-scope",
+    oracle: "spec",
+    async run(ctx) {
+      const { req, host } = ctx;
+      const reproduction = "As owner, mint an admin-role key with only the private:read permission. It must reach /private/member, be refused on /private/admin (lacks the permission) and /private/owner (role), be refused on another tenant, never appear in GET /api-keys.";
+      const t = await ownerTenant(ctx, "keys", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token } = t as Extract<typeof t, { h: string }>;
+      const made = await req(h, "POST", "/api-keys", { ...withCookie(token), body: json({ name: "probe", role: "admin", permissions: ["private:read"] }) });
+      const broken = requireSetup(made, "minting a scoped key", reproduction);
+      if (broken) return broken;
+      const key = (JSON.parse(made.body) as { key: string }).key;
+      const bearer = { headers: { authorization: `Bearer ${key}` } };
+      const other = await ownerTenant(ctx, "keys-other", reproduction);
+      if ("error" in other && other.error) return other.error;
+      const otherHost = (other as Extract<typeof other, { h: string }>).h;
+      const [member, admin, owner, elsewhere, listing] = await Promise.all([
+        req(h, "GET", "/private/member", bearer),
+        req(h, "GET", "/private/admin", bearer),
+        req(h, "GET", "/private/owner", bearer),
+        req(otherHost, "GET", "/private/member", bearer),
+        req(h, "GET", "/api-keys", withCookie(token)),
+      ]);
+      const secret = key.slice("bkk_".length + 16 + 1); // base64url secrets may contain "_", so never split on it
+      void host;
+      return {
+        ...specOracle([
+          { name: "key reaches the route its permission names", ok: member.status === 200, detail: `HTTP ${member.status}` },
+          { name: "key is refused where it lacks the permission, even though its role would allow it", ok: admin.status === 403, detail: `HTTP ${admin.status}` },
+          { name: "key is refused above its role", ok: owner.status === 403, detail: `HTTP ${owner.status}` },
+          { name: "key is refused on another tenant", ok: elsewhere.status === 401, detail: `HTTP ${elsewhere.status}` },
+          { name: "key secret never appears in the key listing", ok: listing.status === 200 && !listing.body.includes(secret), detail: `HTTP ${listing.status}` },
+        ]),
+        reproduction,
       };
     },
   },

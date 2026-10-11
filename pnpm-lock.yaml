@@ -175,6 +175,9 @@ importers:
 
   examples/demo-app:
     dependencies:
+      '@kalahroudi/bulkhead-auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@kalahroudi/bulkhead-core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -188,6 +191,12 @@ importers:
       wrangler:
         specifier: ^4.0.0
         version: 4.149.0(@cloudflare/workers-types@4.20260702.1)(@types/node@24.19.2)
+
+  packages/auth:
+    dependencies:
+      '@kalahroudi/bulkhead-core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/core:
     dependencies:

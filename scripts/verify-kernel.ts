@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { request } from "node:http";
 import { createServer } from "node:net";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,9 +24,11 @@ const root = new URL("..", import.meta.url).pathname;
 const demo = join(root, "examples/demo-app");
 const persist = mkdtempSync(join(tmpdir(), "bulkhead-demo-state-"));
 const logDir = mkdtempSync(join(tmpdir(), "bulkhead-demo-log-"));
+// A fresh bootstrap secret per run: handed to the Worker as a var and to verify through the environment, never written to disk.
+const bootstrapToken = randomBytes(24).toString("hex");
 const port = Number(process.env.DEMO_PORT ?? (await freePort()));
 
-const wrangler = spawn(join(demo, "node_modules/.bin/wrangler"), ["dev", "--local", "--ip", "127.0.0.1", "--port", port, "--persist-to", persist], {
+const wrangler = spawn(join(demo, "node_modules/.bin/wrangler"), ["dev", "--local", "--ip", "127.0.0.1", "--port", port, "--persist-to", persist, "--var", `BULKHEAD_BOOTSTRAP_TOKEN:${bootstrapToken}`], {
   cwd: demo,
   env: { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "1" },
   stdio: ["ignore", "pipe", "pipe"],
@@ -53,8 +56,8 @@ try {
     if (status === 200) break;
     await new Promise((r) => setTimeout(r, 500));
   }
-  const rules = process.env.VERIFY_RULES ?? "TENANT-1,TENANT-4,TENANT-5";
-  const res = spawnSync(process.execPath, [join(root, "packages/verify/src/cli.ts"), "run", "--target", `http://127.0.0.1:${port}`, "--rules", rules, "--log-dir", logDir], { stdio: "inherit", timeout: 120_000 });
+  const rules = process.env.VERIFY_RULES ?? "TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4";
+  const res = spawnSync(process.execPath, [join(root, "packages/verify/src/cli.ts"), "run", "--target", `http://127.0.0.1:${port}`, "--rules", rules, "--log-dir", logDir], { stdio: "inherit", timeout: 240_000, env: { ...process.env, BULKHEAD_VERIFY_BOOTSTRAP_TOKEN: bootstrapToken } });
   if (res.error) console.error(`verify run failed to complete: ${res.error.message}`);
   if (res.status !== 0) console.error("\nwrangler output:\n" + output.split("\n").slice(-15).join("\n"));
   process.exitCode = res.status ?? 1;

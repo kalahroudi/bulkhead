@@ -1,5 +1,62 @@
 [
   {
+    "method": "DELETE",
+    "path": "/api-keys/:id",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api-keys",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api-keys",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/auth/bootstrap",
+    "access": {
+      "kind": "public",
+      "reason": "first-owner claim of an empty tenant; requires the bootstrap secret and succeeds only while the tenant has no users"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/auth/login",
+    "access": {
+      "kind": "public",
+      "reason": "exchanges credentials for a session; throttled per email"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/auth/logout",
+    "access": {
+      "kind": "role",
+      "role": "member"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/auth/me",
+    "access": {
+      "kind": "role",
+      "role": "member",
+      "permission": "self:read"
+    }
+  },
+  {
     "method": "GET",
     "path": "/notes",
     "access": {
@@ -17,10 +74,68 @@
   },
   {
     "method": "GET",
+    "path": "/private/admin",
+    "access": {
+      "kind": "role",
+      "role": "admin",
+      "permission": "private:admin"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/private/member",
+    "access": {
+      "kind": "role",
+      "role": "member",
+      "permission": "private:read"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/private/owner",
+    "access": {
+      "kind": "role",
+      "role": "owner"
+    }
+  },
+  {
+    "method": "GET",
     "path": "/summary",
     "access": {
       "kind": "public",
       "reason": "demo route used by the verify probes; real apps declare roles"
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/users/:id/role",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "DELETE",
+    "path": "/users/:id",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/users",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/users",
+    "access": {
+      "kind": "role",
+      "role": "admin"
     }
   },
   {

@@ -128,3 +128,29 @@ test("tenant store refuses another tenant and reserved tables", () => {
   assert.throws(() => store.run("t1", [], "select * from _bulkhead_meta", []), /reserved/);
   assert.equal(JSON.stringify(store.run("t1", [], "select v from t", []).rows), '[{"v":"x"}]');
 });
+
+test("AUTH-4 gate: a credential with permissions reaches only routes that declare a permission it holds", async () => {
+  let ran = 0;
+  const app = createApp({ authenticate: async (req) => ({ id: "k", role: "admin", ...(req.headers.get("x-test-perms") ? { permissions: req.headers.get("x-test-perms")!.split(",") } : {}) }) });
+  const h = () => (ran++, new Response("ok"));
+  app.route("GET", "/read", { role: "member", permission: "notes:read" }, h);
+  app.route("GET", "/none", { role: "member" }, h);
+  const env = makeEnv();
+  const get = (path: string, perms?: string) => call(app, env, "a.demo.localhost", path, perms ? { headers: { "x-test-perms": perms } } : {});
+  assert.equal((await get("/read", "notes:read")).status, 200);
+  assert.equal((await get("/read", "notes:write")).status, 403);
+  assert.equal((await get("/none", "notes:read")).status, 403); // route declares none: unreachable by scoped credentials
+  assert.equal((await get("/none")).status, 200); // no permission set (a session): role alone decides
+  assert.equal(ran, 2);
+  assert.deepEqual(app.manifest().find((m) => m.path === "/read")?.access, { kind: "role", role: "member", permission: "notes:read" });
+  for (const bad of [{ role: "member", permission: "Bad" }, { role: "member", permission: "" }, { public: { reason: "r" }, permission: "a:b" }])
+    assert.throws(() => app.route("GET", "/bad", bad as never, h), PolicyError, JSON.stringify(bad));
+});
+
+test("authenticate receives the tenant-scoped db, and it is the one handlers get", async () => {
+  let seen: unknown;
+  const app = createApp({ schema: ["create table t (v text)"], authenticate: async (_r, _t, db) => ((seen = db), { id: "u", role: "member" }) });
+  app.route("GET", "/x", { role: "member" }, async (c) => c.json({ same: c.db === seen }));
+  const r = await call(app, makeEnv(), "a.demo.localhost", "/x");
+  assert.deepEqual(await r.json(), { same: true });
+});
