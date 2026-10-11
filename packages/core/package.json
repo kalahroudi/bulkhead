@@ -1,0 +1,16 @@
+{
+  "name": "@kalahroudi/bulkhead-core",
+  "version": "0.0.0",
+  "description": "Bulkhead runtime: tenant resolution, tenant-scoped storage handle, policy-gated routes.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./tenant": "./src/tenant/index.ts",
+    "./api": "./src/api/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": { "hono": "^4.9.0" }
+}

@@ -17,10 +17,10 @@ export interface ProbeResult {
   reproduction: string;
 }
 
-export async function runProbes(target: URL): Promise<ProbeResult[]> {
+export async function runProbes(target: URL, only: readonly Probe[] = probes): Promise<ProbeResult[]> {
   const ctx: Context = { req: makeRequester(target), host: (t) => `${t}.demo.localhost`, webhookSecret: WEBHOOK_SECRET };
   const out: ProbeResult[] = [];
-  for (const probe of probes) {
+  for (const probe of only) {
     try {
       const v = await probe.run(ctx);
       out.push({ probe, passed: v.passed, evidence: v.evidence, reproduction: v.reproduction });
@@ -84,11 +84,10 @@ async function failuresAgainst(bugs: string[]): Promise<string[]> {
 }
 
 export async function selfCheck(): Promise<SelfCheck> {
-  const probeOf = (id: string) => seededBugs.find((b) => b.id === id)!.probeId;
   const plan: { name: string; bugs: string[]; expected: string[] }[] = [
     { name: "fixed fixture: no false positives", bugs: [], expected: [] },
-    ...seededBugs.map((b) => ({ name: `only ${b.id}`, bugs: [b.id], expected: [probeOf(b.id)] })),
-    { name: "all bugs", bugs: seededBugs.map((b) => b.id), expected: seededBugs.map((b) => b.probeId).sort() },
+    ...seededBugs.map((b) => ({ name: `only ${b.id}`, bugs: [b.id], expected: [...b.probeIds].sort() })),
+    { name: "all bugs", bugs: seededBugs.map((b) => b.id), expected: [...new Set(seededBugs.flatMap((b) => b.probeIds))].sort() },
   ];
   const cases: SelfCheckCase[] = [];
   for (const p of plan) {
@@ -101,21 +100,39 @@ export async function selfCheck(): Promise<SelfCheck> {
 
 export interface RunReport {
   valid: boolean;
+  /** Probes not run because of the rule filter. Reported, never silently dropped. */
+  skipped: Probe[];
   results: ProbeResult[];
   findings: Finding[];
   selfCheck: SelfCheck;
 }
 
+/**
+ * Rule filter for a targeted run. Unknown IDs and an empty selection are refused outright: a typo
+ * must not silently narrow the run to nothing and hand back a green report.
+ */
+export function selectProbes(rules?: readonly string[]): Probe[] {
+  if (rules === undefined) return probes;
+  const known = new Set(probes.map((p) => p.ruleId));
+  const unknown = [...new Set(rules)].filter((r) => !known.has(r));
+  if (unknown.length) throw new Error(`unknown rule id(s): ${unknown.join(", ")}`);
+  const selected = probes.filter((p) => rules.includes(p.ruleId));
+  if (!selected.length) throw new Error("no probes selected");
+  return selected;
+}
+
 /** Self-check first (the run is invalid if it fails), then the probes against the target. Events go to the log. */
-export async function verifyTarget(target: URL, log: EventLog): Promise<RunReport> {
+export async function verifyTarget(target: URL, log: EventLog, rules?: readonly string[]): Promise<RunReport> {
+  const selected = selectProbes(rules);
+  const skipped = probes.filter((p) => !selected.includes(p));
   log.append("verify.run", { phase: "started", target: target.host, verifyVersion: VERIFY_VERSION });
   const sc = await selfCheck();
   log.append("verify.run", { phase: "selfcheck", valid: sc.valid, seededBugsFound: sc.seededBugsFound, seededBugsTotal: sc.seededBugsTotal });
   if (!sc.valid) {
     log.append("verify.run", { phase: "finished", valid: false, reason: "oracle self-check failed; run is invalid" });
-    return { valid: false, results: [], findings: [], selfCheck: sc };
+    return { valid: false, skipped, results: [], findings: [], selfCheck: sc };
   }
-  const results = await runProbes(target);
+  const results = await runProbes(target, selected);
   const findings: Finding[] = [];
   for (const r of results.filter((x) => !x.passed)) {
     const n = findings.length + 1;
@@ -135,6 +152,6 @@ export async function verifyTarget(target: URL, log: EventLog): Promise<RunRepor
     findings.push(f);
     log.append("finding.recorded", { finding: f, evidence: r.evidence });
   }
-  log.append("verify.run", { phase: "finished", valid: true, passed: findings.length === 0, probes: results.length, findings: findings.length });
-  return { valid: true, results, findings, selfCheck: sc };
+  log.append("verify.run", { phase: "finished", valid: true, passed: findings.length === 0, probes: results.length, skipped: skipped.map((p) => p.id), findings: findings.length });
+  return { valid: true, skipped, results, findings, selfCheck: sc };
 }

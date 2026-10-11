@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { seededBugs } from "../src/bugs.ts";
 import { EventLog } from "../src/eventlog.ts";
-import { runProbes, selfCheck, startFixture, verifyTarget } from "../src/run.ts";
+import { runProbes, selectProbes, selfCheck, startFixture, verifyTarget } from "../src/run.ts";
 import { checkTarget } from "../src/targets.ts";
 import { probes } from "../src/probes.ts";
 import { spec } from "@kalahroudi/bulkhead-spec";
@@ -27,15 +27,21 @@ test("every probe maps to a real spec rule and its scenario stub", () => {
   }
 });
 
-test("a blind oracle makes the run invalid: probes that never fail would miss every bug", async () => {
-  // Mutation check: against the all-bugs fixture, a probe set that passes everything must NOT be accepted.
+test("with every bug present, exactly the cataloged probes fail", async () => {
   const fx = await startFixture(seededBugs.map((b) => b.id));
   try {
-    const results = await runProbes(fx.url);
-    assert.equal(results.filter((r) => !r.passed).length, seededBugs.length);
+    const failed = (await runProbes(fx.url)).filter((r) => !r.passed).map((r) => r.probe.id).sort();
+    assert.deepEqual(failed, [...new Set(seededBugs.flatMap((b) => b.probeIds))].sort());
   } finally {
     await fx.stop();
   }
+});
+
+test("the rule filter refuses unknown ids and refuses to run nothing", () => {
+  assert.throws(() => selectProbes(["TENANT-9"]), /unknown rule id/);
+  assert.throws(() => selectProbes([]), /no probes selected/);
+  assert.deepEqual(selectProbes(["TENANT-1"]).map((p) => p.id), ["identity-header-differential"]);
+  assert.equal(selectProbes().length, probes.length);
 });
 
 test("verifyTarget records confirmed findings and events against a vulnerable target", async () => {

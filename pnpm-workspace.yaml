@@ -1,2 +1,7 @@
 packages:
   - "packages/*"
+  - "examples/*"
+# Build scripts are blocked by default (supply chain). Only the two binaries wrangler needs are allowed.
+allowBuilds:
+  esbuild: true
+  workerd: true
