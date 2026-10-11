@@ -1,6 +1,6 @@
 # DR-0004: TENANT-1 is decided by the differential oracle
 
-- Status: proposed (awaiting owner approval via this PR)
+- Status: accepted (owner approved in session on 2026-10-11; cryptographic signature pending)
 - Date: 2026-10-11
 - Rules: TENANT-1
 
