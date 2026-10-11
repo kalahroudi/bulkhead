@@ -1,0 +1,21 @@
+{
+  "name": "@kalahroudi/bulkhead-plane",
+  "version": "0.0.0",
+  "description": "Bulkhead development plane: event log reader and terminal watch view. Observer only.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "bulkhead-watch": "./src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "watch": "node src/cli.ts"
+  },
+  "dependencies": {
+    "@kalahroudi/bulkhead-spec": "workspace:*"
+  },
+  "devDependencies": {
+    "@kalahroudi/bulkhead-verify": "workspace:*"
+  }
+}

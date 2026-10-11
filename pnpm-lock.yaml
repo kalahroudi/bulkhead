@@ -173,7 +173,23 @@ importers:
         specifier: ^5.9.0
         version: 5.9.3
 
+  packages/plane:
+    dependencies:
+      '@kalahroudi/bulkhead-spec':
+        specifier: workspace:*
+        version: link:../spec
+    devDependencies:
+      '@kalahroudi/bulkhead-verify':
+        specifier: workspace:*
+        version: link:../verify
+
   packages/spec: {}
+
+  packages/verify:
+    dependencies:
+      '@kalahroudi/bulkhead-spec':
+        specifier: workspace:*
+        version: link:../spec
 
 packages:
 
