@@ -1,0 +1,15 @@
+{
+  "name": "@kalahroudi/bulkhead-spec",
+  "version": "0.0.0",
+  "description": "Bulkhead rule catalog, data classification, decision-record, attestation and event formats. Data and lint only; no runtime code.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "lint": "node scripts/lint-spec.ts",
+    "catalog": "node scripts/generate-catalog.ts",
+    "catalog:check": "node scripts/generate-catalog.ts --check"
+  }
+}

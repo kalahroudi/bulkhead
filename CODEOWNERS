@@ -1,0 +1,12 @@
+# Spec, verify, route manifest and crypto paths need the owner's review.
+/SPEC.md                    @kalahroudi
+/FROZEN_PATHS               @kalahroudi
+/CODEOWNERS                 @kalahroudi
+/packages/spec/             @kalahroudi
+/packages/verify/           @kalahroudi
+/packages/core/             @kalahroudi
+/packages/core/src/crypto/  @kalahroudi
+/**/route-manifest*         @kalahroudi
+/docs/decisions/            @kalahroudi
+/LICENSE                    @kalahroudi
+/SECURITY.md                @kalahroudi

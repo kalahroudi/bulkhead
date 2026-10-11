@@ -1,0 +1,8 @@
+# Paths that may not change after the first commit without an accepted, signed decision record.
+# One path or directory prefix per line.
+SPEC.md
+packages/spec/
+packages/verify/
+packages/core/
+FROZEN_PATHS
+CODEOWNERS
