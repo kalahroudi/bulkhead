@@ -29,3 +29,11 @@ export function differentialOracle(a: Response, b: Response, label: string): Ver
     ? { passed: true, evidence: `${label}: responses identical` }
     : { passed: false, evidence: `${label}: HTTP ${a.status} ${a.body} vs HTTP ${b.status} ${b.body}` };
 }
+
+/** Metamorphic: adding tenant B must not change any response tenant A receives. */
+export function metamorphicOracle(before: Response, after: Response, label: string): Verdict {
+  const same = before.status === after.status && before.body === after.body;
+  return same
+    ? { passed: true, evidence: `${label}: unchanged after adding another tenant` }
+    : { passed: false, evidence: `${label}: changed after adding another tenant (before ${before.body}; after ${after.body})` };
+}

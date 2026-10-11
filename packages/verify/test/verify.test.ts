@@ -27,12 +27,11 @@ test("every probe maps to a real spec rule and its scenario stub", () => {
   }
 });
 
-test("a blind oracle makes the run invalid: probes that never fail would miss every bug", async () => {
-  // Mutation check: against the all-bugs fixture, a probe set that passes everything must NOT be accepted.
+test("with every bug present, exactly the cataloged probes fail", async () => {
   const fx = await startFixture(seededBugs.map((b) => b.id));
   try {
-    const results = await runProbes(fx.url);
-    assert.equal(results.filter((r) => !r.passed).length, seededBugs.length);
+    const failed = (await runProbes(fx.url)).filter((r) => !r.passed).map((r) => r.probe.id).sort();
+    assert.deepEqual(failed, [...new Set(seededBugs.flatMap((b) => b.probeIds))].sort());
   } finally {
     await fx.stop();
   }

@@ -1,0 +1,10 @@
+{
+  "name": "bulkhead-demo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "durable_objects": { "bindings": [{ "name": "BULKHEAD_TENANT", "class_name": "TenantObject" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantObject"] }],
+  "d1_databases": [{ "binding": "BULKHEAD_DB", "database_name": "bulkhead-demo", "database_id": "00000000-0000-0000-0000-000000000000" }],
+  // Development only. Auto-provisioning is refused by the core in any other environment.
+  "vars": { "BULKHEAD_ENV": "development", "BULKHEAD_BASE_DOMAIN": "demo.localhost", "BULKHEAD_AUTO_PROVISION": "true" }
+}

@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { Oracle } from "@kalahroudi/bulkhead-spec";
 import type { Requester } from "./http.ts";
-import { canaryOracle, differentialOracle, specOracle, type Verdict } from "./oracles.ts";
+import { canaryOracle, differentialOracle, metamorphicOracle, specOracle, type Verdict } from "./oracles.ts";
 
 export interface Context {
   req: Requester;
@@ -53,6 +53,25 @@ export const probes: Probe[] = [
       return {
         ...canaryOracle(m, [{ where: "GET /summary as tenant B after tenant A warmed it", response: r }]),
         reproduction: `Plant ${m} in tenant A, GET /summary as A, then GET /summary with Host: ${host("cache-b")} and scan for the marker.`,
+      };
+    },
+  },
+  {
+    id: "add-tenant-metamorphic",
+    ruleId: "TENANT-4",
+    scenario: "tenant-isolation/adding-tenant-is-invisible",
+    oracle: "metamorphic",
+    async run({ req, host }) {
+      const run = randomBytes(4).toString("hex");
+      const a = host(`meta-a-${run}`);
+      const b = host(`meta-b-${run}`);
+      await req(a, "POST", "/notes", { body: json({ text: `a-note-${run}` }) });
+      const before = await req(a, "GET", "/notes");
+      await req(b, "POST", "/notes", { body: json({ text: `b-note-${run}` }) }); // tenant B appears and writes
+      const after = await req(a, "GET", "/notes");
+      return {
+        ...metamorphicOracle(before, after, "tenant A's GET /notes"),
+        reproduction: `As ${a}: POST a note, GET /notes. Then create tenant ${b} by POSTing a note there. GET /notes as ${a} again; the two responses must be identical.`,
       };
     },
   },

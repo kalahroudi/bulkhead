@@ -1,0 +1,34 @@
+[
+  {
+    "method": "GET",
+    "path": "/notes",
+    "access": {
+      "kind": "public",
+      "reason": "demo route used by the verify probes; real apps declare roles"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/notes",
+    "access": {
+      "kind": "public",
+      "reason": "demo route used by the verify probes; real apps declare roles"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/summary",
+    "access": {
+      "kind": "public",
+      "reason": "demo route used by the verify probes; real apps declare roles"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/whoami",
+    "access": {
+      "kind": "public",
+      "reason": "demo route used by the verify probes; real apps declare roles"
+    }
+  }
+]
