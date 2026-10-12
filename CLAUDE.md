@@ -26,8 +26,8 @@ Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005
 
 - `pnpm gate:phase0`: typecheck, tests, spec lint, and check that `SPEC.md` matches the catalog.
 - `pnpm gate:phase1`: phase 0 gate plus the verify self-check (all seeded bugs caught, no false positives).
-- `pnpm gate:phase2`: phase 1 gate, route manifest check, and black-box verify against the demo Worker running in local workerd.
-- `pnpm gate:phase3`: phase 2 gate plus the auth package tests and black-box AUTH-1..4 probes against the demo Worker.
+- `pnpm gate:phase2`: phase 1 gate, route manifest check, and a black-box verify of the tenancy rules (TENANT-1/4/5) against the demo Worker running in local workerd.
+- `pnpm gate:phase3`: phase 2 gate plus a black-box verify of the auth rules (AUTH-1..4, alongside TENANT-1/4/5) against the demo Worker.
 - `node packages/plane/src/cli.ts [--once] [--log-dir .bulkhead]`: terminal view of the event log.
 - `pnpm --filter @kalahroudi/bulkhead-spec catalog`: regenerate `SPEC.md`.
 

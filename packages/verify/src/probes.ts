@@ -40,6 +40,8 @@ const SESSION_COOKIE = "__Host-bk_session";
 const setCookies = (r: Response): string[] => [r.headers["set-cookie"] ?? []].flat();
 const sessionOf = (r: Response) => setCookies(r).map((c) => new RegExp(`^${SESSION_COOKIE}=([^;]+)`).exec(c)?.[1]).find(Boolean);
 const withCookie = (token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}` } });
+/** A cookie-authenticated write, with the same-origin Origin a browser always sends (the gate refuses cookie writes with neither Origin nor Sec-Fetch-Site). */
+const cookieWrite = (host: string, token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}`, origin: `http://${host}` } });
 const fail = (evidence: string, reproduction: string) => ({ passed: false, evidence, reproduction });
 
 /** A throwaway tenant with an owner who is signed in. Every step must succeed or the probe fails (setup is not a pass). */
@@ -54,7 +56,7 @@ async function ownerTenant({ req, host, bootstrapToken }: Context, name: string,
   const token = sessionOf(login);
   if (brokenLogin || !token) return { error: brokenLogin ?? fail("owner login set no session cookie", reproduction) };
   const addUser = async (email: string, role: string) => {
-    const r = await req(h, "POST", "/users", { ...withCookie(token), body: json({ email, password: PASSWORD, role }) });
+    const r = await req(h, "POST", "/users", { ...cookieWrite(h, token), body: json({ email, password: PASSWORD, role }) });
     const broken = requireSetup(r, `creating ${role} ${email}`, reproduction);
     return broken ? { error: broken } : { id: (JSON.parse(r.body) as { id: string }).id };
   };
@@ -246,7 +248,7 @@ export const probes: Probe[] = [
       if ("error" in t && t.error) return t.error;
       const { h, token } = t as Extract<typeof t, { h: string }>;
       const before = await req(h, "GET", "/private/member", withCookie(token));
-      const out = await req(h, "POST", "/auth/logout", withCookie(token));
+      const out = await req(h, "POST", "/auth/logout", cookieWrite(h, token));
       const after = await req(h, "GET", "/private/member", withCookie(token));
       return {
         ...specOracle([
@@ -274,7 +276,7 @@ export const probes: Probe[] = [
       const m = await loginAs("m@probe.test");
       if ("error" in m) return m.error!;
       const before = await req(h, "GET", "/private/member", withCookie(m.token));
-      const changed = await req(h, "PATCH", `/users/${added.id}/role`, { ...withCookie(token), body: json({ role: "admin" }) });
+      const changed = await req(h, "PATCH", `/users/${added.id}/role`, { ...cookieWrite(h, token), body: json({ role: "admin" }) });
       const after = await req(h, "GET", "/private/member", withCookie(m.token));
       return {
         ...specOracle([
@@ -326,7 +328,7 @@ export const probes: Probe[] = [
       const t = await ownerTenant(ctx, "keys", reproduction);
       if ("error" in t && t.error) return t.error;
       const { h, token } = t as Extract<typeof t, { h: string }>;
-      const made = await req(h, "POST", "/api-keys", { ...withCookie(token), body: json({ name: "probe", role: "admin", permissions: ["private:read"] }) });
+      const made = await req(h, "POST", "/api-keys", { ...cookieWrite(h, token), body: json({ name: "probe", role: "admin", permissions: ["private:read"] }) });
       const broken = requireSetup(made, "minting a scoped key", reproduction);
       if (broken) return broken;
       const key = (JSON.parse(made.body) as { key: string }).key;
@@ -350,6 +352,140 @@ export const probes: Probe[] = [
           { name: "key is refused above its role", ok: owner.status === 403, detail: `HTTP ${owner.status}` },
           { name: "key is refused on another tenant", ok: elsewhere.status === 401, detail: `HTTP ${elsewhere.status}` },
           { name: "key secret never appears in the key listing", ok: listing.status === 200 && !listing.body.includes(secret), detail: `HTTP ${listing.status}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "cross-tenant-session",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "Sign in on tenant A, then present tenant A's session cookie on tenant B's hostname: it must be 401. The session must keep working on tenant A.";
+      const a = await ownerTenant(ctx, "xten-a", reproduction);
+      if ("error" in a && a.error) return a.error;
+      const b = await ownerTenant(ctx, "xten-b", reproduction);
+      if ("error" in b && b.error) return b.error;
+      const { h: ha, token: ta } = a as Extract<typeof a, { h: string }>;
+      const { h: hb } = b as Extract<typeof b, { h: string }>;
+      const onA = await req(ha, "GET", "/private/member", withCookie(ta));
+      const onB = await req(hb, "GET", "/private/member", withCookie(ta));
+      return {
+        ...specOracle([
+          { name: "session works on the tenant that issued it", ok: onA.status === 200, detail: `HTTP ${onA.status}` },
+          { name: "session is refused on another tenant", ok: onB.status === 401, detail: `HTTP ${onB.status} ${onB.body}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "csrf-origin",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "POST /api-keys with a session cookie and a cross-origin Origin (or no Origin and no Sec-Fetch-Site): the write must be 401. The same write with the tenant's own Origin, or with Sec-Fetch-Site: same-origin, must succeed (201).";
+      const t = await ownerTenant(ctx, "csrf", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token } = t as Extract<typeof t, { h: string }>;
+      const key = (csrf: Record<string, string>) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}`, ...csrf }, body: json({ name: "csrf-probe", permissions: ["self:read"] }) });
+      const crossOrigin = await req(h, "POST", "/api-keys", key({ origin: "http://evil.example" }));
+      const ownOrigin = await req(h, "POST", "/api-keys", key({ origin: `http://${h}` }));
+      const noHeaders = await req(h, "POST", "/api-keys", key({}));
+      const secFetch = await req(h, "POST", "/api-keys", key({ "sec-fetch-site": "same-origin" }));
+      return {
+        ...specOracle([
+          { name: "cross-origin cookie write is refused", ok: crossOrigin.status === 401, detail: `HTTP ${crossOrigin.status}` },
+          { name: "same-origin cookie write is allowed", ok: ownOrigin.status === 201, detail: `HTTP ${ownOrigin.status} ${ownOrigin.body}` },
+          { name: "cookie write with neither Origin nor Sec-Fetch-Site is refused", ok: noHeaders.status === 401, detail: `HTTP ${noHeaders.status}` },
+          { name: "Sec-Fetch-Site: same-origin is accepted without Origin", ok: secFetch.status === 201, detail: `HTTP ${secFetch.status} ${secFetch.body}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "authority-matrix",
+    ruleId: "AUTH-3",
+    scenario: "auth/role-differential",
+    oracle: "differential",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "On one tenant, sign in as member, admin and owner and compare GET /users, GET /api-keys and POST /users {role:owner}. Policy says: member is refused on all three; admin may list but not grant owner; owner may do all three.";
+      const t = await ownerTenant(ctx, "authority", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token, addUser, loginAs } = t as Extract<typeof t, { h: string }>;
+      const sessions: Record<string, string> = { owner: token };
+      for (const role of ["admin", "member"]) {
+        const added = await addUser(`${role}@probe.test`, role);
+        if ("error" in added) return added.error!;
+        const l = await loginAs(`${role}@probe.test`);
+        if ("error" in l) return l.error!;
+        sessions[role] = l.token;
+      }
+      const norm = (s: number) => (s >= 200 && s < 300 ? 200 : s); // roleDifferentialOracle reads allowed as 200; a create is 201
+      const routes = ["GET /users", "GET /api-keys", "POST /users role=owner"];
+      const observed: Record<string, Record<string, number>> = {};
+      for (const [actor, tok] of Object.entries(sessions)) {
+        const create = await req(h, "POST", "/users", { ...cookieWrite(h, tok), body: json({ email: `${actor}-grant@probe.test`, password: PASSWORD, role: "owner" }) });
+        observed[actor] = {
+          "GET /users": (await req(h, "GET", "/users", withCookie(tok))).status,
+          "GET /api-keys": (await req(h, "GET", "/api-keys", withCookie(tok))).status,
+          "POST /users role=owner": norm(create.status),
+        };
+      }
+      const allow = (...r: boolean[]) => Object.fromEntries(routes.map((route, i) => [route, r[i] as boolean]));
+      return { ...roleDifferentialOracle(observed, { member: allow(false, false, false), admin: allow(true, true, false), owner: allow(true, true, true) }), reproduction };
+    },
+  },
+  {
+    id: "key-revocation",
+    ruleId: "AUTH-4",
+    scenario: "auth/api-key-scope",
+    oracle: "spec",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "As owner, create an admin and mint a key as that admin. DELETE /api-keys/:id must revoke it (401). Mint a second key as the admin, have the owner demote the admin, and that key must also stop working (401).";
+      const t = await ownerTenant(ctx, "revoke", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token, addUser, loginAs } = t as Extract<typeof t, { h: string }>;
+      const added = await addUser("revoker@probe.test", "admin");
+      if ("error" in added) return added.error!;
+      const admin = await loginAs("revoker@probe.test");
+      if ("error" in admin) return admin.error!;
+      const mint = async () => {
+        const r = await req(h, "POST", "/api-keys", { ...cookieWrite(h, admin.token), body: json({ name: "probe", role: "admin", permissions: ["private:admin"] }) });
+        const broken = requireSetup(r, "minting a key as the admin", reproduction);
+        if (broken) return { error: broken } as const;
+        return JSON.parse(r.body) as { id: string; key: string };
+      };
+      const bearer = (key: string) => ({ headers: { authorization: `Bearer ${key}` } });
+
+      const first = await mint();
+      if ("error" in first) return first.error;
+      const firstWorks = await req(h, "GET", "/private/admin", bearer(first.key));
+      const revoked = await req(h, "DELETE", `/api-keys/${first.id}`, cookieWrite(h, token));
+      const firstDead = await req(h, "GET", "/private/admin", bearer(first.key));
+
+      const second = await mint();
+      if ("error" in second) return second.error;
+      const secondWorks = await req(h, "GET", "/private/admin", bearer(second.key));
+      const demoted = await req(h, "PATCH", `/users/${added.id}/role`, { ...cookieWrite(h, token), body: json({ role: "member" }) });
+      const secondDead = await req(h, "GET", "/private/admin", bearer(second.key));
+
+      return {
+        ...specOracle([
+          { name: "key works before it is revoked", ok: firstWorks.status === 200, detail: `HTTP ${firstWorks.status}` },
+          { name: "DELETE /api-keys/:id revokes the key", ok: revoked.status === 200, detail: `HTTP ${revoked.status} ${revoked.body}` },
+          { name: "revoked key is refused", ok: firstDead.status === 401, detail: `HTTP ${firstDead.status}` },
+          { name: "second key works before the minter is demoted", ok: secondWorks.status === 200, detail: `HTTP ${secondWorks.status}` },
+          { name: "demoting the minter is accepted", ok: demoted.status === 200, detail: `HTTP ${demoted.status} ${demoted.body}` },
+          { name: "key of a demoted minter is refused", ok: secondDead.status === 401, detail: `HTTP ${secondDead.status}` },
         ]),
         reproduction,
       };

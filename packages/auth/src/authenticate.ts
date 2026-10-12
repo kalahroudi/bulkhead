@@ -43,11 +43,15 @@ export async function revokeSessionToken(db: TenantDb, token: string | null) {
 
 export const sessionTokenOf = (req: Request) => parseCookie(req.headers.get("cookie"), SESSION_COOKIE);
 
-/** Cookie-authenticated writes must come from this host. SameSite=Lax is the first line; this is the second (CSRF). */
+/**
+ * Cookie-authenticated writes must come from this host. SameSite=Lax is the first line; this is the second (CSRF).
+ * A write that carries neither `Origin` nor `Sec-Fetch-Site` is refused: every browser sends at least one, so an
+ * absent pair means a non-browser client, which should present a bearer key instead of a cookie.
+ */
 function sameOrigin(req: Request): boolean {
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return true;
   const origin = req.headers.get("origin");
-  if (origin) {
+  if (origin !== null) {
     try {
       return new URL(origin).host === new URL(req.url).host;
     } catch {
@@ -55,7 +59,7 @@ function sameOrigin(req: Request): boolean {
     }
   }
   const site = req.headers.get("sec-fetch-site");
-  return site === null || site === "same-origin" || site === "none";
+  return site === "same-origin" || site === "none";
 }
 
 interface SessionRow { user_id: string; role: string; last_seen: number; token_hash: string }

@@ -56,7 +56,8 @@ try {
     if (status === 200) break;
     await new Promise((r) => setTimeout(r, 500));
   }
-  const rules = process.env.VERIFY_RULES ?? "TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4";
+  const argRules = (() => { const i = process.argv.indexOf("--rules"); return i >= 0 ? process.argv[i + 1] : undefined; })();
+  const rules = argRules ?? process.env.VERIFY_RULES ?? "TENANT-1,TENANT-4,TENANT-5";
   const res = spawnSync(process.execPath, [join(root, "packages/verify/src/cli.ts"), "run", "--target", `http://127.0.0.1:${port}`, "--rules", rules, "--log-dir", logDir], { stdio: "inherit", timeout: 240_000, env: { ...process.env, BULKHEAD_VERIFY_BOOTSTRAP_TOKEN: bootstrapToken } });
   if (res.error) console.error(`verify run failed to complete: ${res.error.message}`);
   if (res.status !== 0) console.error("\nwrangler output:\n" + output.split("\n").slice(-15).join("\n"));

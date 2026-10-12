@@ -21,7 +21,11 @@ function setup() {
   const env = makeEnv();
   const call = async (host: string, method: string, path: string, opts: { body?: unknown; cookie?: string; bearer?: string; headers?: Record<string, string> } = {}) => {
     const headers: Record<string, string> = { ...(opts.headers ?? {}) };
-    if (opts.cookie) headers.cookie = `${SESSION_COOKIE}=${opts.cookie}`;
+    if (opts.cookie) {
+      headers.cookie = `${SESSION_COOKIE}=${opts.cookie}`;
+      // A browser always sends Origin or Sec-Fetch-Site on a write; default to a same-origin Origin unless the test sets one.
+      if (!headers.origin && !headers["sec-fetch-site"]) headers.origin = `http://${host}.demo.localhost`;
+    }
     if (opts.bearer) headers.authorization = `Bearer ${opts.bearer}`;
     const res = await app.fetch(new Request(`http://${host}.demo.localhost${path}`, { method, headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) }), env);
     const text = await res.text();
@@ -58,6 +62,12 @@ test("bootstrap: needs the secret, works once, and is disabled when no secret is
   off.registerRoutes(a2);
   const r = await a2.fetch(new Request("http://t9.demo.localhost/auth/bootstrap", { method: "POST", body: JSON.stringify({ token: "", email: "o@x.io", password: PW }) }), env);
   assert.equal(r.status, 403);
+  // A secret shorter than the 32-character floor is treated as unset, even when it is presented correctly.
+  const short = createAuth({ bootstrapToken: () => "short-secret" });
+  const a3 = createApp({ schema: short.schema, authenticate: short.authenticate });
+  short.registerRoutes(a3);
+  const rs = await a3.fetch(new Request("http://t9.demo.localhost/auth/bootstrap", { method: "POST", body: JSON.stringify({ token: "short-secret", email: "o@x.io", password: PW }) }), env);
+  assert.equal(rs.status, 403);
   void app;
 });
 
@@ -95,11 +105,15 @@ test("AUTH-2: logout, role change and disable revoke sessions and keys immediate
 });
 
 test("sessions expire (absolute and idle) and unsafe cross-origin writes with a cookie are refused", async () => {
-  const { call, owner, clock } = setup();
+  const { call, owner, clock, app, env } = setup();
   const o = await owner("t1");
   assert.equal((await call("t1", "POST", "/w", { cookie: o, headers: { origin: "http://evil.example" } })).status, 401);
   assert.equal((await call("t1", "POST", "/w", { cookie: o, headers: { origin: "http://t1.demo.localhost" } })).status, 200);
   assert.equal((await call("t1", "POST", "/w", { cookie: o, headers: { "sec-fetch-site": "cross-site" } })).status, 401);
+  assert.equal((await call("t1", "POST", "/w", { cookie: o, headers: { "sec-fetch-site": "same-origin" } })).status, 200);
+  // A cookie write with neither Origin nor Sec-Fetch-Site is refused (a non-browser client must present a key).
+  const bare = await app.fetch(new Request("http://t1.demo.localhost/w", { method: "POST", headers: { cookie: `${SESSION_COOKIE}=${o}` } }), env);
+  assert.equal(bare.status, 401);
   clock.t += SESSION_IDLE_MS + 1;
   assert.equal((await call("t1", "GET", "/m", { cookie: o })).status, 401);
   clock.t += SESSION_TTL_MS;

@@ -5,6 +5,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 const ALL = [
   "missing-tenant-filter", "shared-cache-key", "skipped-signature-check", "tenant-from-header",
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
+  "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -21,7 +22,7 @@ const POLICY: Record<string, { role: Role; permission?: string }> = {
 };
 const users = new Map<string, { id: string; email: string; password: string; role: Role }>(); // key: tenant|email
 const sessions = new Map<string, { tenant: string; userId: string; role: Role }>();
-const keys = new Map<string, { tenant: string; secret: string; role: Role; permissions: string[] }>();
+const keys = new Map<string, { tenant: string; secret: string; role: Role; permissions: string[]; createdBy: string; revoked: boolean }>();
 const tenantUsers = (tenant: string) => [...users.values()].filter((u) => users.get(`${tenant}|${u.email}`) === u);
 const COOKIE = "__Host-bk_session";
 const token = (n: number) => randomBytes(n).toString("base64url");
@@ -40,22 +41,41 @@ interface AuthReply { status: number; body: unknown; cookie?: string }
 const reply = (status: number, body: unknown, cookie?: string): AuthReply => ({ status, body, ...(cookie ? { cookie } : {}) });
 const cookieOf = (h: string | undefined) => new RegExp(`${COOKIE}=([^;\\s]+)`).exec(h ?? "")?.[1];
 
+/** Cookie-authenticated writes need a same-origin Origin or Sec-Fetch-Site, mirroring the real gate (CSRF). */
+function csrfOk(headers: Record<string, string | string[] | undefined>): boolean {
+  if (bugs.has("csrf-ignored")) return true;
+  const origin = headers.origin === undefined ? undefined : String(headers.origin);
+  if (origin !== undefined) {
+    try {
+      return new URL(origin).host === String(headers.host ?? "");
+    } catch {
+      return false;
+    }
+  }
+  const site = headers["sec-fetch-site"];
+  return site === "same-origin" || site === "none";
+}
+
 function principal(tenant: string, headers: Record<string, string | string[] | undefined>): { role: Role; perms?: string[]; id: string } | null {
   const authz = String(headers.authorization ?? "");
   if (authz) {
     const m = /^Bearer bkk_([0-9a-f]{16})_(\S+)$/.exec(authz);
     const k = m && keys.get(m[1] as string);
     if (!k || k.secret !== m[2]) return null;
+    if (k.revoked && !bugs.has("key-revocation-ignored")) return null;
     if (k.tenant !== tenant && !bugs.has("api-key-cross-tenant")) return null;
     return { role: k.role, perms: k.permissions, id: `key:${m[1]}` };
   }
   const sess = sessions.get(cookieOf(String(headers.cookie ?? "")) ?? "");
-  if (sess && sess.tenant === tenant) return { role: sess.role, id: sess.userId };
+  if (sess && (bugs.has("session-cross-tenant") || sess.tenant === tenant)) return { role: sess.role, id: sess.userId };
   return bugs.has("default-role") ? { role: "member", id: "anonymous" } : null;
 }
 
 function authRoute(method: string, path: string, tenant: string, headers: Record<string, string | string[] | undefined>, raw: string): AuthReply | null {
   const json = (): Record<string, unknown> => { try { return JSON.parse(raw || "{}"); } catch { return {}; } };
+  const isPublic = path === "/auth/login" || path === "/auth/bootstrap";
+  const cookieWrite = headers.cookie !== undefined && !String(headers.authorization ?? "") && method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+  if (!isPublic && cookieWrite && !csrfOk(headers)) return reply(401, { error: "authentication required" });
   const policy = POLICY[path];
   if (policy && method === "GET") {
     const p = principal(tenant, headers);
@@ -90,12 +110,20 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     if (!bugs.has("logout-keeps-session")) sessions.delete(cookieOf(String(headers.cookie ?? "")) ?? "");
     return reply(200, { ok: true });
   }
+  if (method === "GET" && path === "/users") {
+    const p = principal(tenant, headers);
+    if (!p) return reply(401, { error: "authentication required" });
+    if (RANK[p.role] < (bugs.has("member-can-list-users") ? RANK.member : RANK.admin)) return reply(403, { error: "forbidden" });
+    return reply(200, { users: tenantUsers(tenant).map((u) => ({ id: u.id, email: u.email, role: u.role })) });
+  }
   if (method === "POST" && path === "/users") {
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
     if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
     const b = json();
-    const u = { id: token(8), email: String(b.email), password: String(b.password), role: b.role as Role };
+    const wanted = b.role as Role;
+    if (!bugs.has("escalation-allowed") && RANK[wanted] > RANK[p.role]) return reply(403, { error: "cannot grant a role above your own" });
+    const u = { id: token(8), email: String(b.email), password: String(b.password), role: wanted };
     users.set(`${tenant}|${u.email}`, u);
     return reply(201, { id: u.id, role: u.role });
   }
@@ -108,6 +136,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     if (!u) return reply(404, { error: "not found" });
     u.role = String(json().role) as Role;
     if (!bugs.has("role-change-keeps-session")) for (const [k, s] of sessions) if (s.userId === u.id) sessions.delete(k);
+    if (!bugs.has("key-revocation-ignored")) for (const [, k] of keys) if (k.createdBy === u.id) k.revoked = true;
     return reply(200, { id: u.id, role: u.role });
   }
   if (method === "POST" && path === "/api-keys") {
@@ -117,13 +146,23 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const b = json();
     const id = randomBytes(8).toString("hex");
     const secret = token(32);
-    keys.set(id, { tenant, secret, role: (b.role as Role) ?? "member", permissions: (b.permissions as string[]) ?? [] });
+    keys.set(id, { tenant, secret, role: (b.role as Role) ?? "member", permissions: (b.permissions as string[]) ?? [], createdBy: p.id, revoked: false });
     return reply(201, { id, key: `bkk_${id}_${secret}` });
+  }
+  const keyPath = /^\/api-keys\/([^/]+)$/.exec(path);
+  if (method === "DELETE" && keyPath) {
+    const p = principal(tenant, headers);
+    if (!p) return reply(401, { error: "authentication required" });
+    if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    const k = keys.get(keyPath[1] as string);
+    if (!k || k.tenant !== tenant) return reply(404, { error: "not found" });
+    k.revoked = true;
+    return reply(200, { id: keyPath[1], revoked: true });
   }
   if (method === "GET" && path === "/api-keys") {
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
-    if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    if (RANK[p.role] < (bugs.has("member-can-list-users") ? RANK.member : RANK.admin)) return reply(403, { error: "forbidden" });
     return reply(200, { keys: [...keys].filter(([, k]) => k.tenant === tenant).map(([id, k]) => ({ id, role: k.role, permissions: k.permissions })) });
   }
   return null;

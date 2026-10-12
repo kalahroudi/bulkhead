@@ -19,6 +19,7 @@ export interface AuthRoutesOptions {
 const MAX_FAILED_LOGINS = 5;
 const LOCKOUT_MS = 15 * 60_000;
 const MIN_PASSWORD = 12;
+const MIN_BOOTSTRAP_SECRET = 32;
 const rank = (r: Role) => ROLE_VALUES.indexOf(r);
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,255}$/;
 
@@ -48,7 +49,8 @@ export function registerAuthRoutes(app: App, options: AuthRoutesOptions) {
   app.route("POST", "/auth/bootstrap", { public: { reason: "first-owner claim of an empty tenant; requires the bootstrap secret and succeeds only while the tenant has no users" } }, async (c) => {
     const b = await body(c);
     const secret = options.bootstrapToken();
-    if (!secret || typeof b?.token !== "string" || !safeEqual(b.token, secret)) return c.json({ error: "forbidden" }, 403);
+    // A secret shorter than the floor is treated as unset: bootstrap fails closed rather than accepting a weak one.
+    if (!secret || secret.length < MIN_BOOTSTRAP_SECRET || typeof b?.token !== "string" || !safeEqual(b.token, secret)) return c.json({ error: "forbidden" }, 403);
     const email = normalizeEmail(b.email);
     if (!email || !validPassword(b.password)) return c.json({ error: `email and a password of at least ${MIN_PASSWORD} characters are required` }, 400);
     const id = crypto.randomUUID();

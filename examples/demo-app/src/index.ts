@@ -11,7 +11,7 @@ const app = createDemoApp(() => bootstrapToken); // a route without a policy thr
 export default {
   fetch: (req: Request, env: Record<string, unknown>) => {
     const t = env.BULKHEAD_BOOTSTRAP_TOKEN;
-    bootstrapToken = typeof t === "string" && t.length >= 32 ? t : undefined; // too short counts as unset: bootstrap stays off
+    bootstrapToken = typeof t === "string" ? t : undefined; // the auth package treats a short or absent secret as bootstrap disabled
     return app.fetch(req, env);
   },
 };
