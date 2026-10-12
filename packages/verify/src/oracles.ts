@@ -37,3 +37,17 @@ export function metamorphicOracle(before: Response, after: Response, label: stri
     ? { passed: true, evidence: `${label}: unchanged after adding another tenant` }
     : { passed: false, evidence: `${label}: changed after adding another tenant (before ${before.body}; after ${after.body})` };
 }
+
+/**
+ * Differential across actors (AUTH-3): every actor's outcome on every route must match what policy allows.
+ * `expected` is the policy matrix (actor -> route -> allowed). A difference that policy does not explain is a finding.
+ */
+export function roleDifferentialOracle(observed: Record<string, Record<string, number>>, expected: Record<string, Record<string, boolean>>): Verdict {
+  const bad: string[] = [];
+  for (const [actor, routes] of Object.entries(expected))
+    for (const [route, allowed] of Object.entries(routes)) {
+      const status = observed[actor]?.[route];
+      if (allowed ? status !== 200 : status !== 403) bad.push(`${actor} on ${route}: HTTP ${status ?? "none"}, policy says ${allowed ? "allowed (200)" : "denied (403)"}`);
+    }
+  return bad.length ? { passed: false, evidence: bad.join("; ") } : { passed: true, evidence: "every actor's outcomes match policy" };
+}

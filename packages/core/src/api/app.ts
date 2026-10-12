@@ -8,6 +8,11 @@ import { PolicyError, roleAtLeast, toManifestEntry, validatePolicy, type Manifes
 export interface User {
   id: string;
   role: Role;
+  /**
+   * Set only for credentials that carry a declared permission set (API keys, AUTH-4). When present, the route
+   * must declare a `permission` the user holds; routes that declare none are unreachable. Absent for sessions.
+   */
+  permissions?: readonly string[];
 }
 
 /** What a handler receives. Deliberately has no `env`: raw bindings are not reachable from route code. */
@@ -26,8 +31,12 @@ export type Handler = (c: RouteContext) => Promise<Response> | Response;
 export interface AppOptions {
   /** Per-tenant SQLite schema steps, applied in order. */
   schema?: readonly string[];
-  /** Resolves the signed-in user for this tenant. Default: nobody, so only public routes are reachable. Real sessions arrive in Phase 3. */
-  authenticate?: (req: Request, tenant: Tenant) => Promise<User | null>;
+  /**
+   * Resolves the signed-in user for this tenant. Default: nobody, so only public routes are reachable.
+   * Receives the tenant-scoped handle so sessions and keys live in the tenant's own database (TENANT-3).
+   * Runs inside the gate, so no handler has run and none receives the handle until it returns.
+   */
+  authenticate?: (req: Request, tenant: Tenant, db: TenantDb) => Promise<User | null>;
   /** Plan entitlements arrive in Phase 5. Default denies every feature (fail closed). */
   hasFeature?: (tenant: Tenant, feature: string) => Promise<boolean>;
 }
@@ -61,18 +70,20 @@ export function createApp(options: AppOptions = {}) {
       // 1. The hostname picks the tenant. Nothing else is consulted.
       const tenant = await resolveTenant(new URL(c.req.url).hostname, cfg);
       if (!tenant) return notFound();
-      // 2. Policy gate, before any tenant-scoped handle exists.
-      const user = checked.public ? null : ((await options.authenticate?.(c.req.raw, tenant)) ?? null);
+      // 2. Policy gate, before any handler runs. The scoped handle exists, but only authenticate sees it until the gate passes.
+      const db = createTenantDb(tenant, cfg.tenants, schema);
+      const user = checked.public ? null : ((await options.authenticate?.(c.req.raw, tenant, db)) ?? null);
       if (!checked.public) {
         if (!user) return reply(401, "authentication required");
         if (!roleAtLeast(user.role, checked.role!)) return reply(403, "forbidden");
+        if (user.permissions && !(checked.permission && user.permissions.includes(checked.permission))) return reply(403, "forbidden");
         if (checked.feature && !(await options.hasFeature?.(tenant, checked.feature))) return reply(403, "forbidden");
       }
       // 3. Only now does the handler get a handle with the tenant fixed.
       return handler({
         tenant,
         user,
-        db: createTenantDb(tenant, cfg.tenants, schema),
+        db,
         req: c.req.raw,
         params: Object.freeze({ ...c.req.param() }),
         json: (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }),

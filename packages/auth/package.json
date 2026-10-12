@@ -1,0 +1,17 @@
+{
+  "name": "@kalahroudi/bulkhead-auth",
+  "version": "0.0.0",
+  "description": "Bulkhead auth: per-tenant users, sessions and scoped API keys on top of the core policy gate.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@kalahroudi/bulkhead-core": "workspace:*"
+  }
+}

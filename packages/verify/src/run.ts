@@ -8,6 +8,8 @@ import { probes, type Context, type Probe } from "./probes.ts";
 
 export const VERIFY_VERSION = "0.0.0";
 export const WEBHOOK_SECRET = "whsec_fixture";
+/** The fixture's own bootstrap secret. Real targets supply theirs via BULKHEAD_VERIFY_BOOTSTRAP_TOKEN. */
+export const FIXTURE_BOOTSTRAP_TOKEN = "bootstrap_fixture_0123456789abcdef0123";
 export const LIMITS = "A green result means no known leak paths, not proof that none exist. Coverage measures only what has been written down.";
 
 export interface ProbeResult {
@@ -17,8 +19,8 @@ export interface ProbeResult {
   reproduction: string;
 }
 
-export async function runProbes(target: URL, only: readonly Probe[] = probes): Promise<ProbeResult[]> {
-  const ctx: Context = { req: makeRequester(target), host: (t) => `${t}.demo.localhost`, webhookSecret: WEBHOOK_SECRET };
+export async function runProbes(target: URL, only: readonly Probe[] = probes, bootstrapToken: string | undefined = FIXTURE_BOOTSTRAP_TOKEN): Promise<ProbeResult[]> {
+  const ctx: Context = { req: makeRequester(target), host: (t) => `${t}.demo.localhost`, webhookSecret: WEBHOOK_SECRET, bootstrapToken };
   const out: ProbeResult[] = [];
   for (const probe of only) {
     try {
@@ -40,7 +42,7 @@ export interface Fixture {
 export function startFixture(bugs: string[]): Promise<Fixture> {
   const server = fileURLToPath(new URL("../fixture/server.ts", import.meta.url));
   const child = spawn(process.execPath, [server], {
-    env: { ...process.env, FIXTURE_BUGS: bugs.length ? bugs.join(",") : "none", FIXTURE_WEBHOOK_SECRET: WEBHOOK_SECRET, PORT: "0" },
+    env: { ...process.env, FIXTURE_BUGS: bugs.length ? bugs.join(",") : "none", FIXTURE_WEBHOOK_SECRET: WEBHOOK_SECRET, FIXTURE_BOOTSTRAP_TOKEN, PORT: "0" },
     stdio: ["ignore", "pipe", "inherit"],
   });
   return new Promise((resolve, reject) => {
@@ -122,7 +124,7 @@ export function selectProbes(rules?: readonly string[]): Probe[] {
 }
 
 /** Self-check first (the run is invalid if it fails), then the probes against the target. Events go to the log. */
-export async function verifyTarget(target: URL, log: EventLog, rules?: readonly string[]): Promise<RunReport> {
+export async function verifyTarget(target: URL, log: EventLog, rules?: readonly string[], bootstrapToken?: string): Promise<RunReport> {
   const selected = selectProbes(rules);
   const skipped = probes.filter((p) => !selected.includes(p));
   log.append("verify.run", { phase: "started", target: target.host, verifyVersion: VERIFY_VERSION });
@@ -132,7 +134,7 @@ export async function verifyTarget(target: URL, log: EventLog, rules?: readonly 
     log.append("verify.run", { phase: "finished", valid: false, reason: "oracle self-check failed; run is invalid" });
     return { valid: false, skipped, results: [], findings: [], selfCheck: sc };
   }
-  const results = await runProbes(target, selected);
+  const results = await runProbes(target, selected, bootstrapToken);
   const findings: Finding[] = [];
   for (const r of results.filter((x) => !x.passed)) {
     const n = findings.length + 1;

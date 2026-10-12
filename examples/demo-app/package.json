@@ -11,6 +11,7 @@
     "manifest:check": "node scripts/manifest.ts --check"
   },
   "dependencies": {
+    "@kalahroudi/bulkhead-auth": "workspace:*",
     "@kalahroudi/bulkhead-core": "workspace:*",
     "hono": "^4.9.0"
   },
