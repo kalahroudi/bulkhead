@@ -1,6 +1,6 @@
 # DR-0006: Phase 3 auth: core hook change, verify additions, known limits
 
-- Status: proposed (owner acceptance and signature pending; the builder cannot accept its own record)
+- Status: accepted (owner approved in session on 2026-10-12; cryptographic signature pending)
 - Date: 2026-10-11
 - Rules: AUTH-1, AUTH-2, AUTH-3, AUTH-4, ROUTE-2 (manifest gains `permission`)
 
@@ -89,5 +89,6 @@ Known limits, none of them silent:
 `pnpm gate:phase3` passes: typecheck, unit tests, spec lint, catalog check, verify self-check, route
 manifest check, and a black-box run of TENANT-1/4/5 and AUTH-1..4 against the demo Worker in local
 workerd. `gate:phase2` now runs the tenancy rules alone and no longer pulls in the auth probes;
-`gate:phase3` adds the AUTH rule set on top, so the phase boundary is real. Phase 4 (crypto) may begin
-once the owner accepts this record.
+`gate:phase3` adds the AUTH rule set on top, so the phase boundary is real. The CSRF check was also
+mutated against the real Worker (origin comparison ignored; no-header fallback restored): each failed
+`csrf-origin` and nothing else. Phase 4 (crypto) may begin; DR-0007 proposes its opening item.

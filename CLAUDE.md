@@ -20,7 +20,7 @@ Bulkhead turns a Cloudflare Workers project into a multi-tenant service, with se
 
 ## Current state
 
-Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is built and passes `gate:phase3`; DR-0006 awaits owner acceptance.
+Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has not started; DR-0007 proposes its first item.
 
 ## Commands
 
