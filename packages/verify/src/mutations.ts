@@ -150,7 +150,7 @@ export const mutations: Mutation[] = [
       "add-tenant-metamorphic", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "bootstrap-token-required", "cache-canary",
       "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling",
       "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "notes-list-canary", "role-change-authority",
-      "role-change-revokes", "role-matrix",
+      "role-change-revokes", "role-matrix", "unknown-email-login-same-answer",
     ],
   },
   {
