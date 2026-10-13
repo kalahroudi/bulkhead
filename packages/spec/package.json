@@ -8,7 +8,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts",
-    "lint": "node scripts/lint-spec.ts",
+    "lint": "node scripts/lint-spec.ts && node scripts/lint-decisions.ts",
     "catalog": "node scripts/generate-catalog.ts",
     "catalog:check": "node scripts/generate-catalog.ts --check"
   }
