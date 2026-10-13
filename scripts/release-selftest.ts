@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync as run } from "node:child_process";
-import { FIXES, RELEASE_MARKER, assertCleanObjects, planPublicRepo, buildExport, publicCatalog, publicRuleIds, changelogSection, commitToPublicRepo, git, npmTag, redact, remoteHasBranch, resolveIdentity, scanForLeaks, scanTarball, shippable, validVersion, verifyTagMatchesExport, walk } from "../release/lib.ts";
+import { FIXES, RELEASE_MARKER, assertCleanObjects, planPublicRepo, refuseIfPrivateRemote, snapshot, buildExport, publicCatalog, publicRuleIds, changelogSection, commitToPublicRepo, git, npmTag, redact, remoteHasBranch, resolveIdentity, scanForLeaks, scanTarball, shippable, validVersion, verifyTagMatchesExport, walk } from "../release/lib.ts";
 
 const root = join(import.meta.dirname, "..");
 const CATALOG = "packages/spec/src/rules.ts";
@@ -13,6 +13,8 @@ let bad = 0;
 const check = (ok: boolean, msg: string) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) bad++; };
 const throws = (fn: () => unknown, re: RegExp) => { try { fn(); return false; } catch (e) { return re.test((e as Error).message); } };
 const tmp = mkdtempSync(join(tmpdir(), "bulkhead-release-selftest-"));
+// Commits standing in for other people's work on the public repo come from a human identity, whatever the environment says.
+const human = { ...process.env, GIT_AUTHOR_NAME: "Other Person", GIT_AUTHOR_EMAIL: "other@example.org", GIT_COMMITTER_NAME: "Other Person", GIT_COMMITTER_EMAIL: "other@example.org" };
 // A tool identity in the environment must NOT end up in the public history: the explicit identity has to win.
 Object.assign(process.env, { GIT_AUTHOR_NAME: "Claude", GIT_AUTHOR_EMAIL: "noreply@anthropic.com", GIT_COMMITTER_NAME: "Claude", GIT_COMMITTER_EMAIL: "noreply@anthropic.com" });
 
@@ -86,7 +88,8 @@ try {
   git(["init", "--quiet", "--bare", "-b", "trunk", bare], tmp);
   const remote = `file://${bare}`;
   const fake = (name: string, body: string) => { const d = join(tmp, name); rmSync(d, { recursive: true, force: true }); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "README.md"), body); return d; };
-  const release = (version: string, dir: string, push = true, extra = {}) => commitToPublicRepo({ exportDir: dir, remote, version, notes: `notes for ${version}`, push, workdir: join(tmp, "wd"), identity: person, ...extra });
+  const snap = (d: string) => ({ exportDir: d, snapshot: snapshot(d) });
+  const release = (version: string, dir: string, push = true, extra = {}) => commitToPublicRepo({ ...snap(dir), remote, version, notes: `notes for ${version}`, push, workdir: join(tmp, "wd"), identity: person, ...extra });
   const refs = () => String(git(["ls-remote", remote], tmp).stdout);
 
   check(!/refs\/heads\/main/.test(refs()), "remote starts with no main");
@@ -106,21 +109,21 @@ try {
   check(String(git(["show", "main:README.md"], bare).stdout) === "two" && !String(git(["ls-tree", "-r", "--name-only", "main"], bare).stdout).includes(".git/"), "the pushed tree is exactly the export");
 
   // The public tag must hold exactly the tree about to be published to npm (after a partial failure, with --skip-git).
-  check(!throws(() => verifyTagMatchesExport(remote, "v0.2.0", fake("e2", "two"), join(tmp, "vt")), /./), "skip-git rerun: the tag matches an identical export");
-  check(throws(() => verifyTagMatchesExport(remote, "v0.2.0", fake("e5", "different"), join(tmp, "vt")), /differs from what v0\.2\.0 holds/), "skip-git rerun: a different export is refused");
-  check(throws(() => verifyTagMatchesExport(remote, "v9.9.9", fake("e2", "two"), join(tmp, "vt")), /does not exist/), "skip-git rerun: a missing tag is refused");
+  check(!throws(() => verifyTagMatchesExport(remote, "v0.2.0", snapshot(fake("e2", "two")).tree, join(tmp, "vt")), /./), "skip-git rerun: the tag matches an identical export");
+  check(throws(() => verifyTagMatchesExport(remote, "v0.2.0", snapshot(fake("e5", "different")).tree, join(tmp, "vt")), /differs from what v0\.2\.0 holds/), "skip-git rerun: a different export is refused");
+  check(throws(() => verifyTagMatchesExport(remote, "v9.9.9", snapshot(fake("e2", "two")).tree, join(tmp, "vt")), /does not exist/), "skip-git rerun: a missing tag is refused");
 
   // Branch lookup is exact: `feature/main` is not `main`.
   const bare2 = join(tmp, "other.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare2], tmp);
   const seed = join(tmp, "seed"); mkdirSync(seed); git(["init", "--quiet", "-b", "feature/main"], seed); writeFileSync(join(seed, "a"), "x");
-  git(["add", "-A"], seed); git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "seed"], seed); git(["push", "--quiet", `file://${bare2}`, "feature/main"], seed);
+  git(["add", "-A"], seed); git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "seed"], seed, { env: human }); git(["push", "--quiet", `file://${bare2}`, "feature/main"], seed);
   check(!remoteHasBranch(`file://${bare2}`, "main") && remoteHasBranch(`file://${bare2}`, "feature/main"), "a branch named feature/main is not mistaken for main");
 
   // An existing main that this tool did not write is never silently replaced.
   const bare3 = join(tmp, "foreign.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare3], tmp);
   const seed3 = join(tmp, "seed3"); mkdirSync(seed3); git(["init", "--quiet", "-b", "main"], seed3); writeFileSync(join(seed3, "THEIRS.md"), "someone else's file");
-  git(["add", "-A"], seed3); git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "their work"], seed3); git(["push", "--quiet", `file://${bare3}`, "main"], seed3);
-  const foreign = (extra = {}) => commitToPublicRepo({ exportDir: fake("e6", "mine"), remote: `file://${bare3}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd3"), identity: person, ...extra });
+  git(["add", "-A"], seed3); git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "their work"], seed3, { env: human }); git(["push", "--quiet", `file://${bare3}`, "main"], seed3);
+  const foreign = (extra = {}) => commitToPublicRepo({ ...snap(fake("e6", "mine")), remote: `file://${bare3}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd3"), identity: person, ...extra });
   check(throws(() => foreign(), /holds 1 commit\(s\) this tool did not write.*REPLACES/), "an existing main written by someone else is refused");
   const adopted = foreign({ adopt: true });
   check(adopted.removed.includes("THEIRS.md") && String(git(["ls-tree", "--name-only", "main"], bare3).stdout).trim() === "README.md", "with --adopt-existing it replaces main and reports exactly what it removed");
@@ -145,7 +148,7 @@ try {
   try {
     const bare4 = join(tmp, "hostile.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare4], tmp);
     const notes = "### Added\n- a thing\n\n### Known limits\n- another";
-    commitToPublicRepo({ exportDir: fake("e7", "seven"), remote: `file://${bare4}`, version: "1.0.0", notes, push: true, workdir: join(tmp, "wd4"), identity: person });
+    commitToPublicRepo({ ...snap(fake("e7", "seven")), remote: `file://${bare4}`, version: "1.0.0", notes, push: true, workdir: join(tmp, "wd4"), identity: person });
     const commitObj = String(git(["cat-file", "-p", "main"], bare4).stdout);
     check(!/gpgsig/.test(commitObj) && !/Co-Authored-By|Claude|anthropic/i.test(commitObj) && /author Release Person <person@example\.org>/.test(commitObj), "a tool signing key, tool identity and trailer-adding hook in the machine's git config do not reach the public commit");
     const tagObj = String(git(["cat-file", "-p", "refs/tags/v1.0.0"], bare4).stdout);
@@ -158,12 +161,12 @@ try {
 
   // 9. The public repo is a mirror: commits written by someone else are listed and refused, with the removals named before anything happens.
   const bare5 = join(tmp, "mirror.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare5], tmp);
-  commitToPublicRepo({ exportDir: fake("e8", "eight"), remote: `file://${bare5}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd5"), identity: person });
+  commitToPublicRepo({ ...snap(fake("e8", "eight")), remote: `file://${bare5}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd5"), identity: person });
   const contrib = join(tmp, "contrib"); git(["clone", "--quiet", "--branch", "main", `file://${bare5}`, contrib], tmp); writeFileSync(join(contrib, "CONTRIBUTED.md"), "outside work");
-  git(["add", "-A"], contrib); git(["-c", "user.name=Other", "-c", "user.email=o@o", "commit", "--quiet", "-m", "A pull request"], contrib); git(["push", "--quiet", "origin", "main"], contrib);
-  let refusal = ""; try { planPublicRepo({ exportDir: fake("e9", "nine"), remote: `file://${bare5}`, workdir: join(tmp, "plan5") }); } catch (e) { refusal = (e as Error).message; }
+  git(["add", "-A"], contrib); git(["-c", "user.name=Other", "-c", "user.email=o@o", "commit", "--quiet", "-m", "A pull request"], contrib, { env: human }); git(["push", "--quiet", "origin", "main"], contrib);
+  let refusal = ""; try { planPublicRepo({ files: snapshot(fake("e9", "nine")).files, remote: `file://${bare5}`, workdir: join(tmp, "plan5") }); } catch (e) { refusal = (e as Error).message; }
   check(/1 commit\(s\) this tool did not write.*A pull request.*CONTRIBUTED\.md/.test(refusal), "a later outside commit is named, and the files that would be removed are listed in the refusal, before any push");
-  const planned = planPublicRepo({ exportDir: fake("e9", "nine"), remote: `file://${bare5}`, workdir: join(tmp, "plan5"), adopt: true });
+  const planned = planPublicRepo({ files: snapshot(fake("e9", "nine")).files, remote: `file://${bare5}`, workdir: join(tmp, "plan5"), adopt: true });
   check(planned.exists && planned.foreign.length === 1 && planned.removed.includes("CONTRIBUTED.md"), "with --adopt-existing the plan reports the same, and still changes nothing");
 
   // 10. The scan has no blind spots: every file is read, binary files and unusual extensions included, and phase wording is case-insensitive.
@@ -189,6 +192,80 @@ try {
   check(bad2.status === 1 && /(tool identity|no non-empty|uncommitted)/.test(bad2.stderr), "the command refuses a tool identity, a missing changelog section, or a dirty tree, before exporting");
   const bad3 = cli("9.9.9", "--dry-run", "--author", "Ada <ada@example.org>");
   check(bad3.status === 1 && /(no non-empty|uncommitted)/.test(bad3.stderr) && !/Export the public tree/.test(bad3.stdout), "the command stops on a missing changelog section or a dirty tree before exporting anything");
+  // 13. Round-3 hardening, each with a test that can fail.
+  check(["https://github.com/kalahroudi/bulkhead.git", "https://github.com/Kalahroudi/bulkhead", "git@github.com:kalahroudi/bulkhead.git", "ssh://git@github.com/kalahroudi/bulkhead.git/", "https://user:tok@github.com/kalahroudi/bulkhead.git", "git+https://github.com/kalahroudi/bulkhead.git"].every((r) => throws(() => refuseIfPrivateRemote(r), /private repository/)) && !throws(() => refuseIfPrivateRemote("https://github.com/flamingosh/bulkhead.git"), /./) && !throws(() => refuseIfPrivateRemote(`file://${bare}`), /./), "the private repository is refused as a target in every spelling, and the public one is not");
+  check(throws(() => resolveIdentity("Ann <x> Lee <ann@example.org>"), /must look like/) && throws(() => resolveIdentity("Copilot <c@example.org>"), /tool identity/), "an author name git would mangle, or another tool's identity, is refused");
+
+  // Verbatim message: trailing spaces, double blank lines and '#' headings survive, and the read-back does not misfire on them.
+  const bare6 = join(tmp, "verbatim.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare6], tmp);
+  const tricky = "### Added\n- hard break  \n\n\n- after two blank lines";
+  commitToPublicRepo({ ...snap(fake("e10", "ten")), remote: `file://${bare6}`, version: "1.0.0", notes: tricky, push: true, workdir: join(tmp, "wd6"), identity: person });
+  const msg = String(git(["log", "-1", "--format=%B", "main"], bare6).stdout);
+  check(msg.includes("- hard break  \n\n\n- after two blank lines") && msg.includes("### Added"), "the commit message is stored verbatim (trailing spaces, blank lines and # headings), and the read-back accepts it");
+
+  // Signing: --sign must really ask for a signature, so with no usable key the release stops instead of publishing unsigned.
+  const bare7 = join(tmp, "signed.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare7], tmp);
+  const noKey = join(tmp, "nokey.gitconfig"); writeFileSync(noKey, "[gpg]\n  format = ssh\n  program = /nonexistent/sign\n[user]\n  signingkey = /nonexistent/key.pub\n");
+  const saved2 = process.env.GIT_CONFIG_GLOBAL; process.env.GIT_CONFIG_GLOBAL = noKey;
+  try { check(throws(() => commitToPublicRepo({ ...snap(fake("e11", "eleven")), remote: `file://${bare7}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd7"), identity: person, sign: true }), /commit failed/) && !/refs\/heads\/main/.test(String(git(["ls-remote", `file://${bare7}`], tmp).stdout)), "--sign asks for a signature: with no usable key the release fails and pushes nothing"); }
+  finally { if (saved2 === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = saved2; }
+
+  // The read-back, branch by branch, on hand-made objects.
+  const rb = join(tmp, "rb"); rmSync(rb, { recursive: true, force: true }); mkdirSync(rb); git(["init", "--quiet", "-b", "main"], rb); writeFileSync(join(rb, "a"), "x"); git(["add", "-A"], rb);
+  const mkCommit = (author: string, message: string, extraHeader = "") => {
+    const tree = String(git(["write-tree"], rb).stdout).trim();
+    const body = `tree ${tree}\nauthor ${author} 1700000000 +0000\ncommitter ${author} 1700000000 +0000\n${extraHeader}\n${message}`;
+    const sha = String(run("git", ["hash-object", "-t", "commit", "-w", "--stdin"], { cwd: rb, input: body, encoding: "utf8" }).stdout).trim();
+    git(["update-ref", "HEAD", sha], rb); return sha;
+  };
+  const mkTag = (tagger: string, signature = "") => {
+    const head = String(git(["rev-parse", "HEAD"], rb).stdout).trim();
+    const body = `object ${head}\ntype commit\ntag v1\ntagger ${tagger} 1700000000 +0000\n\nv1\n${signature}`;
+    const sha = String(run("git", ["hash-object", "-t", "tag", "-w", "--stdin"], { cwd: rb, input: body, encoding: "utf8" }).stdout).trim();
+    git(["update-ref", "refs/tags/v1", sha], rb);
+  };
+  const me = "Release Person <person@example.org>";
+  mkCommit(me, "msg\n"); mkTag(me);
+  check(!throws(() => assertCleanObjects(rb, "v1", person, false, "msg\n"), /./), "the read-back accepts a clean commit and tag");
+  mkCommit(me, "msg\n", "gpgsig -----BEGIN SSH SIGNATURE-----\n abc\n -----END SSH SIGNATURE-----\n"); 
+  check(throws(() => assertCleanObjects(rb, "v1", person, false, "msg\n"), /carries a signature, but signing was not requested/), "the read-back refuses a signature nobody asked for");
+  mkCommit(me, "msg\n"); 
+  check(throws(() => assertCleanObjects(rb, "v1", person, true, "msg\n"), /signing was requested but the commit is not signed/), "the read-back refuses a missing signature when one was requested");
+  mkCommit(me, "msg\n\nCo-Authored-By: Some Tool <t@example.com>\n");
+  check(throws(() => assertCleanObjects(rb, "v1", person, false, "msg\n"), /message differs/), "the read-back refuses an altered message (a hook-added trailer)");
+  mkCommit(me, "msg\n"); mkTag("Claude <noreply@anthropic.com>");
+  check(throws(() => assertCleanObjects(rb, "v1", person, false, "msg\n"), /the tag is not by/), "the read-back refuses a tag by another identity");
+  mkTag(me, "-----BEGIN SSH SIGNATURE-----\nabc\n-----END SSH SIGNATURE-----\n");
+  check(throws(() => assertCleanObjects(rb, "v1", person, false, "msg\n"), /tag carries a signature/), "the read-back refuses a signed tag nobody asked for");
+  const libSource = readFileSync(join(root, "release/lib.ts"), "utf8");
+  check(libSource.indexOf("assertCleanObjects(o.workdir") > 0 && libSource.indexOf("assertCleanObjects(o.workdir") < libSource.indexOf('git(["push", "--atomic"'), "the read-back runs before the push (deleting that call fails this test)");
+
+  // Content that changes after the scan is caught before the commit: the snapshot is taken early on purpose.
+  const drift = fake("e12", "twelve"); const driftSnap = { exportDir: drift, snapshot: snapshot(drift) };
+  writeFileSync(join(drift, "README.md"), "now mentions docs/decisions/DR-0042\n");
+  const bare8 = join(tmp, "drift.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare8], tmp);
+  check(throws(() => commitToPublicRepo({ ...driftSnap, remote: `file://${bare8}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd8"), identity: person }), /private material/) && !/refs\/heads\/main/.test(String(git(["ls-remote", `file://${bare8}`], tmp).stdout)), "a file that changed after the scan is re-scanned and refused before any push");
+  const drift2 = fake("e13", "thirteen"); const drift2Snap = { exportDir: drift2, snapshot: snapshot(drift2) };
+  writeFileSync(join(drift2, "README.md"), "changed but clean\n");
+  check(throws(() => commitToPublicRepo({ ...drift2Snap, remote: `file://${bare8}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd8"), identity: person }), /differs from the scanned export/), "content that changed after the snapshot, even if clean, does not match the scanned tree");
+  const extra = fake("e14", "fourteen"); const extraSnap = snapshot(extra); writeFileSync(join(extra, "debug.log"), "leftover"); writeFileSync(join(extra, "NOTES.md"), "left behind by the gate");
+  commitToPublicRepo({ exportDir: extra, snapshot: extraSnap, remote: `file://${bare8}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd8"), identity: person });
+  check(String(git(["ls-tree", "-r", "--name-only", "main"], bare8).stdout).trim() === "README.md", "files that appear after the snapshot (gate leftovers) are never committed");
+
+  // A user-level ignore file must not silently drop files from the public commit.
+  const xdg = join(tmp, "xdg"); mkdirSync(join(xdg, "git"), { recursive: true }); writeFileSync(join(xdg, "git/ignore"), "*.md\n");
+  const savedXdg = process.env.XDG_CONFIG_HOME; process.env.XDG_CONFIG_HOME = xdg;
+  try {
+    const bare9 = join(tmp, "xdg.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare9], tmp);
+    commitToPublicRepo({ ...snap(fake("e15", "fifteen")), remote: `file://${bare9}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd9"), identity: person });
+    check(String(git(["ls-tree", "-r", "--name-only", "main"], bare9).stdout).trim() === "README.md", "the releaser's global git ignore file does not drop files from the public commit");
+  } finally { if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = savedXdg; }
+
+  // Adopting an existing main keeps its history, so that history is checked too.
+  const bare10 = join(tmp, "history.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare10], tmp);
+  const seed10 = join(tmp, "seed10"); mkdirSync(seed10); git(["init", "--quiet", "-b", "main"], seed10); writeFileSync(join(seed10, "a"), "x"); git(["add", "-A"], seed10);
+  git(["-c", "user.name=Claude", "-c", "user.email=noreply@anthropic.com", "commit", "--quiet", "-m", "first commit"], seed10, { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }); git(["push", "--quiet", `file://${bare10}`, "main"], seed10);
+  check(throws(() => planPublicRepo({ files: ["README.md"], remote: `file://${bare10}`, workdir: join(tmp, "plan10"), adopt: true }), /carries a tool identity/), "--adopt-existing still refuses history that carries a tool identity");
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

@@ -97,7 +97,7 @@ BULKHEAD_VERIFY_BOOTSTRAP_TOKEN=<the same 32+ character secret> \
   npx @kalahroudi/bulkhead-verify@preview run --target http://127.0.0.1:8787 --rules TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4
 ```
 
-A packaged probe-route helper is planned, not built. `run` refuses non-loopback targets by design. Findings and the event log go to `.bulkhead/`.
+Without `--rules`, `run` also tries a billing-webhook probe (BILL-2) for apps that add that route; the demo has none, so keep the `--rules` list above. A packaged probe-route helper is planned, not built. `run` refuses non-loopback targets by design. Findings and the event log go to `.bulkhead/`.
 
 ## Status and limits
 

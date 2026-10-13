@@ -1,10 +1,11 @@
 // Publishes a release: exports a clean public copy of the repo, checks it, pushes it to the public GitHub repo (creating `main`
 // when the remote has none), tags it, and publishes the four packages to npm. You run it by hand.
 //
-//   node scripts/release.ts <version> [--dry-run] [--yes] [--author "Name <you@example.com>"] [--otp=123456]
+//   node scripts/release.ts <version> [--dry-run] [--yes] [--author "Name <you@example.com>"]
 //                           [--remote=<git url>] [--out=<dir>] [--skip-git] [--skip-npm] [--adopt-existing] [--sign]
 //
-// Needs: git push access to the public repo, `npm login` as a member of the @kalahroudi scope (2FA prompts pass through),
+// Needs: git 2.32+, git push access to the public repo, `npm login` as a member of the @kalahroudi scope (npm prompts for your
+// one-time code at each publish; it is never passed on a command line),
 // and a section `## [<version>]` in CHANGELOG.md. --dry-run does everything except push and publish.
 // Order: export, scan, pack once, scan the tarballs, run the public gate on those exact tarballs, then git (branch and tag in one
 // atomic push), then npm. A rerun after a partial npm failure uses --skip-git and first proves the public tag holds this exact tree.
@@ -14,15 +15,15 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { PACKAGES, PUBLIC_REPO, buildExport, changelogSection, commitToPublicRepo, git, npmTag, planPublicRepo, redact, resolveIdentity, scanForLeaks, scanTarball, tarballManifest, validVersion, verifyTagMatchesExport } from "../release/lib.ts";
+import { PACKAGES, PUBLIC_REPO, buildExport, catalogIdsFromTarball, changelogSection, commitToPublicRepo, git, gitVersionOk, npmTag, planPublicRepo, redact, refuseIfPrivateRemote, resolveIdentity, scanForLeaks, scanTarball, snapshot, tarballManifest, validVersion, verifyTagMatchesExport } from "../release/lib.ts";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
-    "dry-run": { type: "boolean", default: false }, yes: { type: "boolean", default: false }, otp: { type: "string" }, author: { type: "string" },
+    "dry-run": { type: "boolean", default: false }, yes: { type: "boolean", default: false }, author: { type: "string" },
     remote: { type: "string", default: PUBLIC_REPO }, out: { type: "string" },
     "skip-git": { type: "boolean", default: false }, "skip-npm": { type: "boolean", default: false },
     "adopt-existing": { type: "boolean", default: false }, sign: { type: "boolean", default: false },
@@ -36,6 +37,9 @@ const say = (m: string) => console.log(`\n== ${m}`);
 // Anything that may hold a credential or a full copy of the export is removed when the command ends, however it ends.
 const scratch: string[] = [];
 const cleanup = () => { for (const d of scratch) rmSync(d, { recursive: true, force: true }); };
+process.on("SIGINT", () => { cleanup(); process.exit(130); });
+process.on("SIGTERM", () => { cleanup(); process.exit(143); });
+process.on("uncaughtException", (e) => { console.error(`\nrelease aborted: ${redact(String(e instanceof Error ? e.message : e))}`); cleanup(); process.exit(1); });
 const die = (m: string): never => { console.error(`\nrelease aborted: ${redact(m)}`); cleanup(); process.exit(1); };
 const run = (cmd: string, args: string[], cwd: string, extra: { quiet?: boolean; env?: NodeJS.ProcessEnv } = {}) =>
   spawnSync(cmd, args, { cwd, encoding: "utf8", stdio: extra.quiet ? "pipe" : "inherit", env: { ...process.env, ...extra.env } });
@@ -54,11 +58,12 @@ const sha = String(git(["rev-parse", "--short", "HEAD"], root).stdout).trim();
 const notes = changelogSection(readFileSync(join(root, "CHANGELOG.md"), "utf8"), version);
 if (!notes) die(`CHANGELOG.md has no non-empty "## [${version}]" section; write the release notes first`);
 let identity;
-try { identity = resolveIdentity(values.author as string | undefined); } catch (e) { die((e as Error).message); }
+try { identity = resolveIdentity(values.author as string | undefined); refuseIfPrivateRemote(remote); } catch (e) { die((e as Error).message); }
+if (!gitVersionOk()) die("git 2.32 or newer is required (the isolation of the public commit depends on it)");
 console.log(`source commit ${sha}; changelog section found (${notes!.split("\n").length} lines)\npublic commits and the tag will be authored by: ${identity!.name} <${identity!.email}>`);
 
 say("Export the public tree");
-const base = values.out ?? mkdtempSync(join(tmpdir(), "bulkhead-release-"));
+const base = values.out ? resolve(values.out as string) : mkdtempSync(join(tmpdir(), "bulkhead-release-"));
 mkdirSync(base, { recursive: true });
 const exportDir = join(base, "export");
 scratch.push(join(base, "public-repo"), join(base, "public-plan"), join(base, "public-check"), join(base, ".empty-template"));
@@ -70,6 +75,9 @@ say("Scan the export for private material");
 const leaks = scanForLeaks(exportDir);
 if (leaks.length) die(`the export contains private material (${leaks.length}):\n  ${leaks.slice(0, 40).join("\n  ")}`);
 console.log("clean: no private paths, record ids, roadmap phases, private URLs, process wording, unknown rule citations or owner TODOs");
+// Taken now, before install and the gate can leave anything behind: this exact file list and tree is what gets committed.
+const snap = snapshot(exportDir);
+console.log(`snapshot: ${snap.files.length} files, tree ${snap.tree.slice(0, 12)}`);
 
 say("Install, then pack the tarballs once");
 if (run("pnpm", ["install", "--frozen-lockfile"], exportDir).status !== 0) die("pnpm install --frozen-lockfile failed in the export");
@@ -94,7 +102,8 @@ for (const p of PACKAGES) {
 }
 
 say("Scan the tarballs (what npm would serve)");
-const tarLeaks = PACKAGES.flatMap((p) => scanTarball(tarFor(p.name), base));
+const knownRules = catalogIdsFromTarball(tarFor("@kalahroudi/bulkhead-spec"));
+const tarLeaks = PACKAGES.flatMap((p) => scanTarball(tarFor(p.name), base, knownRules));
 if (tarLeaks.length) die(`the tarballs contain private material or stray files (${tarLeaks.length}):\n  ${tarLeaks.slice(0, 40).join("\n  ")}`);
 console.log("clean: only dist, README, LICENSE and package.json, with no private material");
 
@@ -104,7 +113,6 @@ for (const [tgz, h] of hashes) if (sha256(tgz) !== h) die(`${tgz} changed after 
 console.log("the tarballs tested are the tarballs that will be published (hashes unchanged)");
 
 const registryIntegrity = (name: string) => String(run("npm", ["view", `${name}@${version}`, "dist.integrity"], exportDir, { quiet: true }).stdout ?? "").trim();
-const otpEnv = values.otp ? { NPM_CONFIG_OTP: values.otp as string } : {}; // via the environment, so it never shows in `ps`
 if (!values["skip-npm"]) {
   say("npm preflight (before anything irreversible)");
   const taken: string[] = [];
@@ -125,7 +133,7 @@ if (!values["skip-npm"]) {
 let plan = { exists: false, removed: [] as string[], foreign: [] as string[] };
 if (!values["skip-git"]) {
   say("Public repo plan");
-  try { plan = planPublicRepo({ exportDir, remote, workdir: join(base, "public-plan"), adopt: values["adopt-existing"] as boolean }); } catch (e) { die((e as Error).message); }
+  try { plan = planPublicRepo({ files: snap.files, remote, workdir: join(base, "public-plan"), adopt: values["adopt-existing"] as boolean }); } catch (e) { die((e as Error).message); }
   console.log(plan.exists ? `main exists (${plan.foreign.length} commit(s) not written by this tool). It will be replaced by the export; files removed: ${plan.removed.length ? plan.removed.join(", ") : "none"}` : "the public repo has no main; it will be created");
 }
 
@@ -137,7 +145,7 @@ console.log([
   `public repo  ${redact(remote)}   ${values["skip-git"] ? "[skipped; will first prove the public tag holds this exact tree]" : dry ? "[dry run: push --dry-run]" : "[atomic push of main + tag]"}`,
   `npm          ${PACKAGES.map((p) => p.name).join(", ")}   ${values["skip-npm"] ? "[skipped]" : dry ? "[dry run: publish --dry-run]" : `[publish --tag ${dist}]`}`,
   "",
-  "Commits and the tag are unsigned and isolated from your git config" + (values.sign ? " [EXCEPT: --sign uses your config]" : "") + ".",
+  values.sign ? "Commit and tag will be SIGNED with the key from your own git configuration." : "Commit and tag are created unsigned and isolated from your git configuration (the push itself uses your credentials).",
   "",
   "One-time setup the script cannot do for you:",
   "  - the public repo exists (an empty one is fine; `main` is created if missing)",
@@ -153,11 +161,11 @@ if (!dry && !values.yes) {
 }
 
 if (values["skip-git"]) {
-  if (!values["skip-npm"]) { say("Verify the public tag against this export"); try { verifyTagMatchesExport(remote, tag, exportDir, join(base, "public-check")); } catch (e) { die((e as Error).message); } console.log(`${tag} on the public repo holds exactly this tree`); }
+  if (!values["skip-npm"]) { say("Verify the public tag against this export"); try { verifyTagMatchesExport(remote, tag, snap.tree, join(base, "public-check")); } catch (e) { die((e as Error).message); } console.log(`${tag} on the public repo holds exactly this tree`); }
 } else {
   say(`Public repo: ${redact(remote)}`);
   try {
-    const r = commitToPublicRepo({ exportDir, remote, version, notes: notes as string, push: !dry, workdir: join(base, "public-repo"), identity: identity!, adopt: values["adopt-existing"] as boolean, sign: values.sign as boolean });
+    const r = commitToPublicRepo({ exportDir, snapshot: snap, remote, version, notes: notes as string, push: !dry, workdir: join(base, "public-repo"), identity: identity!, adopt: values["adopt-existing"] as boolean, sign: values.sign as boolean });
     if (r.removed.length) console.log(`replaced the previous contents of main; removed ${r.removed.length} file(s): ${r.removed.slice(0, 20).join(", ")}${r.removed.length > 20 ? ", ..." : ""}`);
     console.log(`${r.created ? "created main with" : "added a release commit to main:"} ${r.commit.slice(0, 10)}, tagged ${tag}${dry ? " (dry run: nothing pushed)" : ""}`);
   } catch (e) { die((e as Error).message); }
@@ -170,7 +178,7 @@ if (!values["skip-npm"]) {
     const local = integrity(tarFor(p.name));
     if (registryIntegrity(p.name) === local) { console.log(`skip ${p.name}@${version}: already published, identical to the tested tarball`); continue; }
     const args = ["publish", tarFor(p.name), "--access", "public", "--tag", dist, ...(dry ? ["--dry-run"] : [])];
-    if (run("npm", args, exportDir, { env: otpEnv }).status !== 0) die(`npm publish failed for ${p.name}. Fix it and rerun the same command with --skip-git (it proves the tag matches, and packages already published are skipped).`);
+    if (run("npm", args, exportDir).status !== 0) die(`npm publish failed for ${p.name}. Fix it and rerun the same command with --skip-git (it proves the tag matches, and packages already published are skipped).`);
     if (!dry) {
       // The registry is eventually consistent, so give it a few tries; what it serves must be byte-identical to what was tested.
       let served = "";
@@ -184,6 +192,6 @@ if (!values["skip-npm"]) {
 say("Done");
 cleanup();
 console.log(dry ? "Dry run complete: nothing was pushed or published." : [
-  `Released ${tag}.`,
-  `Check it from a clean directory: npm install @kalahroudi/bulkhead-core@${dist}`,
+  `${values["skip-git"] ? "" : `Pushed ${tag} to the public repo. `}${values["skip-npm"] ? "" : "Published the packages. "}`.trim(),
+  ...(values["skip-npm"] ? [`npm was skipped: publish later by rerunning the same command with --skip-git.`] : [`Check it from a clean directory: npm install @kalahroudi/bulkhead-core@${dist}`]),
 ].join("\n"));
