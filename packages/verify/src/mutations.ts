@@ -1,15 +1,25 @@
 // Mutation catalog (DR-0007, VERIFY-4): each entry deliberately breaks one security-relevant line and names the
 // probe ids that must then fail. `find` must occur exactly once in `file`, otherwise the runner errors instead of skipping.
 // Every entry below was first proven by hand in Phases 2-3. New probes must arrive with at least one entry.
-// The catalog lives here until DR-0007 is signed, which moves it next to the seeded-bug catalog in packages/verify/.
-export interface Mutation {
-  id: string;
-  /** Rule the broken code upholds. */
-  rule: string;
+// Next to the seeded-bug catalog (DR-0007). Paths in `file` are relative to the repository root, because the runner
+// (scripts/verify-mutations.ts) edits a scratch copy of the whole workspace; this module itself never touches a file.
+export interface Edit {
   /** Repo-relative path, edited only in the scratch copy. */
   file: string;
   find: string;
   replace: string;
+}
+
+export interface Mutation {
+  id: string;
+  /** Rule the broken code upholds. */
+  rule: string;
+  /** The primary edit; `find` must match exactly once in `file`. */
+  file: string;
+  find: string;
+  replace: string;
+  /** Further edits applied together with the primary one, for mutations that must defeat two independent defences. */
+  also?: Edit[];
   /** Probe ids that must fail, exactly. A missing one means a worthless scenario; an extra one means a mis-attributed scenario. */
   expect: string[];
   /**
@@ -18,6 +28,14 @@ export interface Mutation {
    */
   gap?: string;
 }
+
+/**
+ * Probes that no catalog entry can break, each with the reason. A probe may only be listed here when its reason is
+ * recorded; a new probe must otherwise arrive with a mutation entry (DR-0007 item 4, enforced in test/mutations.test.ts).
+ */
+export const UNMUTATABLE: Record<string, string> = {
+  "forged-signature": "BILL-2: the demo Worker has no billing routes, so the kernel gate skips this probe; billing arrives in Phase 5",
+};
 
 const AUTH = "packages/auth/src/authenticate.ts";
 const ROUTES = "packages/auth/src/routes.ts";
@@ -103,5 +121,52 @@ export const mutations: Mutation[] = [
     find: '"update api_keys set revoked_at = ? where id = ? and revoked_at is null"',
     replace: '"update api_keys set revoked_at = revoked_at where id = ? and ? is not null and revoked_at is null"',
     expect: ["key-revocation"],
+  },
+
+  {
+    id: "tenant-from-header", rule: "TENANT-1", file: "packages/core/src/api/app.ts",
+    find: "await resolveTenant(new URL(c.req.url).hostname, cfg);",
+    replace: 'await resolveTenant(c.req.header("x-tenant") ? `${c.req.header("x-tenant")}.${cfg.baseDomain}` : new URL(c.req.url).hostname, cfg);',
+    expect: ["identity-header-differential"],
+  },
+  {
+    id: "tenants-share-one-object-and-binding-removed", rule: "TENANT-5", file: "packages/core/src/tenant/handle.ts",
+    find: "const stub = ns.get(ns.idFromName(tenant.id));",
+    replace: 'const stub = ns.get(ns.idFromName("shared"));',
+    // Sharing one object alone is refused by the store's tenant binding (a second defence), which fails closed and
+    // so hides the leak from the canary. Both must be broken for the canary to be able to see data cross.
+    also: [
+      { file: "packages/core/src/tenant/store.ts", find: 'else if (bound !== tenantId) throw new Error("tenant mismatch");', replace: "" },
+      { file: "packages/core/src/tenant/store.ts", find: 'else if (this.exec("select value from _bulkhead_meta where key = \'tenant_id\'", []).rows[0]?.value !== tenantId) throw new Error("tenant mismatch");', replace: "" },
+    ],
+    expect: [
+      "add-tenant-metamorphic", "api-key-scope", "authority-matrix", "cache-canary", "cookie-flags", "cross-tenant-session",
+      "csrf-origin", "key-revocation", "logout-revokes", "notes-list-canary", "role-change-revokes", "role-matrix",
+    ],
+  },
+  {
+    id: "tenant-binding-check-removed", rule: "TENANT-3", file: "packages/core/src/tenant/store.ts",
+    find: 'else if (this.exec("select value from _bulkhead_meta where key = \'tenant_id\'", []).rows[0]?.value !== tenantId) throw new Error("tenant mismatch");',
+    replace: "",
+    expect: [],
+    gap: "the demo never hands a tenant another tenant's object, so the binding check is a second defence no HTTP probe reaches; covered by core unit tests",
+  },
+  {
+    id: "summary-cached-across-tenants", rule: "TENANT-5", file: "examples/demo-app/src/routes.ts",
+    find: 'c.json({ summary: (await c.db.query<{ text: string }>("select text from notes order by id")).map((r) => r.text).join(" | ") })',
+    replace: 'c.json({ summary: ((globalThis as Record<string, string>).__summary ??= (await c.db.query<{ text: string }>("select text from notes order by id")).map((r) => r.text).join(" | ")) })',
+    expect: ["cache-canary"],
+  },
+  {
+    id: "role-gate-ignored", rule: "AUTH-3", file: "packages/core/src/api/app.ts",
+    find: 'if (!roleAtLeast(user.role, checked.role!)) return reply(403, "forbidden");',
+    replace: "",
+    expect: ["authority-matrix", "role-matrix"],
+  },
+  {
+    id: "unknown-session-gets-default-role", rule: "AUTH-1", file: AUTH,
+    find: "if (!row || !isRole(row.role)) return null;",
+    replace: 'if (!row || !isRole(row.role)) return { id: "anonymous", role: "member" };',
+    expect: ["cross-tenant-session", "logout-revokes", "no-default-role", "role-change-revokes", "session-rotation"],
   },
 ];
