@@ -6,7 +6,7 @@ const ALL = [
   "missing-tenant-filter", "shared-cache-key", "skipped-signature-check", "tenant-from-header",
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
   "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
-  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host",
+  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -97,6 +97,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
   if (method === "POST" && path === "/auth/login") {
     const b = json();
     const u = users.get(`${tenant}|${b.email}`);
+    if (!u && bugs.has("unknown-email-login-errors")) return reply(500, { error: "internal error" });
     if (!u || u.password !== b.password || (u.disabled && !bugs.has("disabled-user-can-login"))) return reply(401, { error: "invalid credentials" });
     const presented = cookieOf(String(headers.cookie ?? ""));
     if (presented && !bugs.has("session-fixation")) sessions.delete(presented);

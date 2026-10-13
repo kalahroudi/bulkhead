@@ -184,6 +184,13 @@ export const mutations: Mutation[] = [
     replace: "where k.id = ? and (k.expires_at is null or k.expires_at > ?)",
     expect: ["key-revocation"],
   },
+  {
+    id: "unknown-user-dummy-at-module-scope", rule: "AUTH-2", file: "packages/auth/src/secrets.ts",
+    // Stand-in for the module-scope DUMMY bug: the unknown-user path throws, so login answers 500 for unknown emails only.
+    find: '(stored ?? DUMMY_HASH).split("$")',
+    replace: '(stored ?? (() => { throw new Error("no dummy hash"); })()).split("$")',
+    expect: ["unknown-email-login-same-answer"],
+  },
   // Lines found unprotected by the attacker pass (DR-0009): no black-box probe reaches them yet, so each is a named gap
   // that the auth unit tests must kill. Those owed in DR-0009 have since been promoted to probes (the attacker session that built them).
   {

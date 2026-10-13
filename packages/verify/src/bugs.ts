@@ -33,4 +33,5 @@ export const seededBugs: SeededBug[] = [
   { id: "key-above-minter-role", description: "An admin may mint an API key with a role above their own", probeIds: ["key-role-ceiling"] },
   { id: "listing-leaks-hash", description: "The user and API-key listings include password and secret hashes", probeIds: ["listings-hide-secrets"] },
   { id: "tenant-from-forwarded-host", description: "Tenant taken from a client-supplied x-forwarded-host header", probeIds: ["identity-header-differential"] },
+  { id: "unknown-email-login-errors", description: "Login for an unknown email fails with a 500 instead of the same 401 as a wrong password", probeIds: ["unknown-email-login-same-answer"] },
 ];

@@ -754,4 +754,28 @@ export const probes: Probe[] = [
       return { ...specOracle(checks), reproduction };
     },
   },
+  {
+    id: "unknown-email-login-same-answer",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "On a tenant with an owner, POST /auth/login for an unknown email and for the owner's email with a wrong password. Both must be 401 with byte-identical bodies and set no session cookie.";
+      const t = await ownerTenant(ctx, "unknownlogin", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h } = t as Extract<typeof t, { h: string }>;
+      const wrong = await req(h, "POST", "/auth/login", { body: json({ email: "owner@probe.test", password: `${PASSWORD}-wrong` }) });
+      const unknown = await req(h, "POST", "/auth/login", { body: json({ email: `nobody-${randomBytes(3).toString("hex")}@probe.test`, password: PASSWORD }) });
+      return {
+        ...specOracle([
+          { name: "wrong password is refused with 401 (baseline)", ok: wrong.status === 401, detail: `HTTP ${wrong.status} ${wrong.body}` },
+          { name: "unknown email is refused with 401 (a 5xx must not read as a pass)", ok: unknown.status === 401, detail: `HTTP ${unknown.status} ${unknown.body}` },
+          { name: "unknown email's body is byte-identical to the wrong-password body", ok: unknown.body === wrong.body, detail: `${unknown.body} vs ${wrong.body}` },
+          { name: "neither sets a session cookie", ok: !sessionOf(wrong) && !sessionOf(unknown), detail: "a session cookie was set" },
+        ]),
+        reproduction,
+      };
+    },
+  },
 ];
