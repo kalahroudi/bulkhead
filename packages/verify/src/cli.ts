@@ -34,10 +34,15 @@ if (cmd === "selfcheck") {
   try { selectProbes(rules); } catch (e) { console.error(`refused: ${(e as Error).message}`); process.exit(2); }
   const report = await verifyTarget(target, new EventLog(dir, "verify"), rules, process.env.BULKHEAD_VERIFY_BOOTSTRAP_TOKEN);
   if (!report.valid) { console.error("run INVALID: oracle self-check failed"); process.exit(1); }
-  for (const r of report.results) console.log(`${r.passed ? "pass" : "FAIL"} ${r.probe.ruleId} ${r.probe.id}${r.passed ? "" : `: ${r.evidence}`}`);
+  for (const r of report.results) {
+    if (r.skipped !== undefined) console.log(`skip  ${r.probe.ruleId} ${r.probe.id}: ${r.skipped}`);
+    else console.log(`${r.passed ? "pass" : "FAIL"} ${r.probe.ruleId} ${r.probe.id}${r.passed ? "" : `: ${r.evidence}`}`);
+  }
+  const applied = report.results.filter((r) => r.skipped === undefined);
   if (report.skipped.length) console.log(`Skipped by rule filter: ${report.skipped.map((p) => `${p.ruleId} ${p.id}`).join(", ")}`);
-  coverage(report.results.map((r) => r.probe.ruleId));
+  coverage(applied.map((r) => r.probe.ruleId));
   console.log(`${report.findings.length} confirmed finding(s). ${LIMITS}`);
+  if (applied.length === 0) { console.error("no selected probe applied to this target; nothing was verified"); process.exit(2); }
   process.exit(report.findings.length ? 1 : 0);
 } else {
   console.error("usage: bulkhead-verify selfcheck | run --target <url>");

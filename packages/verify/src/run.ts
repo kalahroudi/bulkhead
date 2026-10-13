@@ -17,6 +17,8 @@ export interface ProbeResult {
   passed: boolean;
   evidence: string;
   reproduction: string;
+  /** Set when the probe does not apply to this target (a missing feature): neither a pass nor a finding. */
+  skipped?: string;
 }
 
 export async function runProbes(target: URL, only: readonly Probe[] = probes, bootstrapToken: string | undefined = FIXTURE_BOOTSTRAP_TOKEN): Promise<ProbeResult[]> {
@@ -25,7 +27,7 @@ export async function runProbes(target: URL, only: readonly Probe[] = probes, bo
   for (const probe of only) {
     try {
       const v = await probe.run(ctx);
-      out.push({ probe, passed: v.passed, evidence: v.evidence, reproduction: v.reproduction });
+      out.push({ probe, passed: v.passed, evidence: v.evidence, reproduction: v.reproduction, ...(v.skipped !== undefined ? { skipped: v.skipped } : {}) });
     } catch (e) {
       // An unreachable or crashing target is not a pass.
       out.push({ probe, passed: false, evidence: `probe error: ${(e as Error).message}`, reproduction: "n/a" });
@@ -79,7 +81,7 @@ export interface SelfCheck {
 async function failuresAgainst(bugs: string[]): Promise<string[]> {
   const fx = await startFixture(bugs);
   try {
-    return (await runProbes(fx.url)).filter((r) => !r.passed).map((r) => r.probe.id).sort();
+    return (await runProbes(fx.url)).filter((r) => !r.passed && r.skipped === undefined).map((r) => r.probe.id).sort();
   } finally {
     await fx.stop();
   }
@@ -136,7 +138,8 @@ export async function verifyTarget(target: URL, log: EventLog, rules?: readonly 
   }
   const results = await runProbes(target, selected, bootstrapToken);
   const findings: Finding[] = [];
-  for (const r of results.filter((x) => !x.passed)) {
+  const notApplicable = results.filter((x) => x.skipped !== undefined);
+  for (const r of results.filter((x) => !x.passed && x.skipped === undefined)) {
     const n = findings.length + 1;
     const f: Finding = {
       id: `F-${String(n).padStart(3, "0")}`,
@@ -154,6 +157,6 @@ export async function verifyTarget(target: URL, log: EventLog, rules?: readonly 
     findings.push(f);
     log.append("finding.recorded", { finding: f, evidence: r.evidence });
   }
-  log.append("verify.run", { phase: "finished", valid: true, passed: findings.length === 0, probes: results.length, skipped: skipped.map((p) => p.id), findings: findings.length });
+  log.append("verify.run", { phase: "finished", valid: true, passed: findings.length === 0, probes: results.length, skipped: skipped.map((p) => p.id), notApplicable: notApplicable.map((r) => ({ probe: r.probe.id, rule: r.probe.ruleId, reason: r.skipped })), findings: findings.length });
   return { valid: true, skipped, results, findings, selfCheck: sc };
 }
