@@ -15,6 +15,12 @@ const check = (ok: boolean, msg: string) => { console.log(`${ok ? "ok  " : "FAIL
 const run = (cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = {}) =>
   spawnSync(cmd, args, { cwd, encoding: "utf8", env: { ...process.env, ...env }, timeout: 600_000 });
 
+// wrangler is pinned to the version the repo already resolves; workers-types takes the range wrangler itself declares as its peer,
+// which is the pair a stranger gets from `npm install -D wrangler @cloudflare/workers-types`.
+const wranglerManifest = JSON.parse(readFileSync(join(root, "examples/demo-app/node_modules/wrangler/package.json"), "utf8")) as { version: string; peerDependencies?: Record<string, string> };
+const wranglerSpec = `wrangler@${wranglerManifest.version}`;
+const typesSpec = `@cloudflare/workers-types@${wranglerManifest.peerDependencies?.["@cloudflare/workers-types"] ?? "latest"}`;
+
 const work = mkdtempSync(join(tmpdir(), "bulkhead-consumer-"));
 let wrangler: ReturnType<typeof spawn> | undefined;
 try {
@@ -38,6 +44,7 @@ try {
     check(stray.length === 0, `${t.split("/").pop()}: contains only dist, README, LICENSE, package.json${stray.length ? ` (stray: ${stray.slice(0, 5)})` : ""}`);
     check(files.some((f) => f === "README.md") && files.some((f) => f === "LICENSE"), `${t.split("/").pop()}: has README and LICENSE`);
     check(!files.some((f) => /\.ts$/.test(f) && !/\.d\.ts$/.test(f)), `${t.split("/").pop()}: no TypeScript source`);
+    check(!files.some((f) => /mutations\.(js|d\.ts)$/.test(f)), `${t.split("/").pop()}: the repo-internal mutation catalog is not shipped`);
     const manifest = JSON.parse(run("tar", ["-xzOf", t, "package/package.json"], work).stdout);
     const text = JSON.stringify(manifest);
     const targets = Object.values(manifest.exports ?? {}).flatMap((e) => (typeof e === "string" ? [e] : Object.values(e as Record<string, string>))).concat(Object.values((manifest.bin ?? {}) as Record<string, string>));
@@ -49,7 +56,7 @@ try {
   const app = join(work, "app");
   mkdirSync(join(app, "src"), { recursive: true });
   writeFileSync(join(app, "package.json"), JSON.stringify({ name: "consumer", private: true, type: "module" }));
-  const install = run("npm", ["install", "--no-audit", "--no-fund", ...tarballs, "wrangler@^4", "@cloudflare/workers-types", "typescript@~5.9", "@types/node"], app);
+  const install = run("npm", ["install", "--no-audit", "--no-fund", ...tarballs, wranglerSpec, typesSpec, "typescript@~5.9", "@types/node"], app);
   check(install.status === 0, `clean install of the tarballs${install.status === 0 ? "" : `\n${install.stderr.slice(-800)}`}`);
   if (install.status !== 0) throw new Error("install failed");
 

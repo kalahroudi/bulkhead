@@ -27,7 +27,7 @@ npm install -D wrangler @cloudflare/workers-types
   "compatibility_date": "2026-01-01",
   "durable_objects": { "bindings": [{ "name": "BULKHEAD_TENANT", "class_name": "TenantObject" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantObject"] }],
-  "d1_databases": [{ "binding": "BULKHEAD_DB", "database_name": "my-app", "database_id": "<your id>" }],
+  "d1_databases": [{ "binding": "BULKHEAD_DB", "database_name": "my-app", "database_id": "00000000-0000-0000-0000-000000000000" }], // any UUID works for local dev; use your real D1 id to deploy
   // Local development only: auto-provisioning is refused in any other environment.
   "vars": { "BULKHEAD_ENV": "development", "BULKHEAD_BASE_DOMAIN": "localhost", "BULKHEAD_AUTO_PROVISION": "true" }
 }
@@ -63,11 +63,24 @@ export default {
 };
 ```
 
-Run it locally with a bootstrap secret of at least 32 characters, and open `http://acme.localhost:8787/`: the hostname picks the tenant.
+Your `tsconfig.json` needs `"types": ["@cloudflare/workers-types"]` and `"moduleResolution": "bundler"` (or `"NodeNext"`) so `cloudflare:workers` typechecks.
+
+Run it locally with a bootstrap secret of **at least 32 characters** (shorter is treated as "bootstrap disabled"). The hostname picks the tenant, so `acme.localhost` is one tenant and `other.localhost` is another:
 
 ```sh
-npx wrangler dev --local --var BULKHEAD_BOOTSTRAP_TOKEN:$(openssl rand -hex 24)
+export TOKEN=$(openssl rand -hex 24)
+npx wrangler dev --local --var BULKHEAD_BOOTSTRAP_TOKEN:$TOKEN
+
+# claim the first owner of the "acme" tenant (password: 12+ characters), then sign in
+curl -s -H 'host: acme.localhost' -H 'content-type: application/json' localhost:8787/auth/bootstrap \
+  -d "{\"token\":\"$TOKEN\",\"email\":\"you@example.com\",\"password\":\"a long passphrase\"}"
+curl -si -H 'host: acme.localhost' -H 'content-type: application/json' localhost:8787/auth/login \
+  -d '{"email":"you@example.com","password":"a long passphrase"}'   # sets a __Host- session cookie
 ```
+
+There is no `/` route; the example serves `GET /notes` and the `/auth/*` and `/users` routes.
+
+**Production tenants.** Auto-provisioning is refused outside `development`, and tenant provisioning is not built yet (planned). Until then a production tenant is a row you insert into the control-plane D1 table: `insert into tenants (id, slug) values ('<uuid>', 'acme')`.
 
 The repository's [`examples/demo-app`](examples/demo-app) is a complete, tested version of this.
 
@@ -77,10 +90,10 @@ The repository's [`examples/demo-app`](examples/demo-app) is a complete, tested 
 npx bulkhead-verify selfcheck    # proves the verifier catches its own seeded bugs; needs no app
 ```
 
-`bulkhead-verify run --target <url>` attacks a running app, but today its probes expect a small set of **probe-contract routes** (`/whoami`, `/notes`, `/summary`, `/private/member|admin|owner`) that only [`examples/demo-app`](examples/demo-app) exposes. To verify your own app, add those routes to a non-production copy of it (see `examples/demo-app/src/routes.ts`) and run:
+`bulkhead-verify run --target <url>` attacks a running app, but today its probes expect a small set of **probe-contract routes** (`/whoami`, `/notes`, `/summary`, `/private/member|admin|owner`) that only [`examples/demo-app`](examples/demo-app) exposes. To verify your own app, add those routes to a non-production copy of it (see `examples/demo-app/src/routes.ts`), set `BULKHEAD_BASE_DOMAIN` to `demo.localhost` (the probes address tenants as `<name>.demo.localhost`), start it with a bootstrap secret of at least 32 characters, and run:
 
 ```sh
-BULKHEAD_VERIFY_BOOTSTRAP_TOKEN=<the same secret> \
+BULKHEAD_VERIFY_BOOTSTRAP_TOKEN=<the same 32+ character secret> \
   npx bulkhead-verify run --target http://127.0.0.1:8787 --rules TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4
 ```
 

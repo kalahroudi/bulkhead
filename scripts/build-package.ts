@@ -16,6 +16,8 @@ writeFileSync(config, JSON.stringify({
     allowImportingTsExtensions: false, rewriteRelativeImportExtensions: true, sourceMap: false,
   },
   include: includeFixture ? ["src", "fixture"] : ["src"],
+  // The mutation catalog names repo-internal paths and is only used by the repo's own gate, so it is not published.
+  exclude: includeFixture ? ["src/mutations.ts"] : [],
 }, null, 2));
 try {
   const r = spawnSync(join(import.meta.dirname, "../node_modules/.bin/tsc"), ["-p", config], { stdio: "inherit" });

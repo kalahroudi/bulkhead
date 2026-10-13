@@ -13,7 +13,8 @@
     "lint": "node scripts/lint-spec.ts && node scripts/lint-decisions.ts",
     "catalog": "node scripts/generate-catalog.ts",
     "catalog:check": "node scripts/generate-catalog.ts --check",
-    "build": "node ../../scripts/build-package.ts"
+    "build": "node ../../scripts/build-package.ts",
+    "prepack": "pnpm build"
   },
   "repository": {
     "type": "git",
