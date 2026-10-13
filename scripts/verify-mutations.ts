@@ -23,10 +23,8 @@ const selected = only ? mutations.filter((m) => only.includes(m.id)) : mutations
 if (only && selected.length !== only.length) { console.error(`unknown mutation id in --only: ${only.filter((o) => !ids.includes(o)).join(", ")}`); process.exit(1); }
 
 const scratch = mkdtempSync(join(tmpdir(), "bulkhead-mutate-"));
-// An interrupted run must not leave a full copy of the workspace behind.
-const removeScratch = () => rmSync(scratch, { recursive: true, force: true });
-process.on("SIGINT", () => { removeScratch(); process.exit(130); });
-process.on("SIGTERM", () => { removeScratch(); process.exit(143); });
+// No signal handlers on purpose: this script is synchronous, so a handler could never run, and installing one would make Ctrl-C and a
+// timeout's SIGTERM do nothing at all. An interrupted run leaves its scratch copy in the temp directory, which holds no secrets files.
 // verbatimSymlinks keeps pnpm's relative links pointing inside the copy, so the mutated packages are what workerd bundles.
 // Files that can hold secrets are never copied: the scratch copy lives in a shared temp directory.
 const SECRET_FILES = /\/(\.dev\.vars|\.env(\.[^/]*)?|\.npmrc|[^/]*\.(pem|key))$/;
@@ -42,7 +40,6 @@ function runVerify(): { failed: string[] } | { error: string } {
   return { failed: results.filter((l) => l.startsWith("FAIL")).map((l) => l.split(" ")[2]!.replace(/:$/, "")).sort() };
 }
 
-/** Runs a package's unit tests in the scratch copy (same files as its `test` script); true when they pass. */
 /** Runs a package's unit tests in the scratch copy. `failures` counts real failing tests; `crashed` means the run died without one (a syntax error, a missing file). */
 function unitTests(pkg: string): { passed: boolean; failures: number; crashed: boolean } {
   const dir = join(scratch, pkg, "test");
