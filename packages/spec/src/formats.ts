@@ -1,7 +1,7 @@
 import { ORACLES, type Oracle } from "./types.ts";
 
 // Format definitions: data classification, decision records, attestations, events.
-// Types plus structural validators only. Hashing, signing and chain verification arrive in Phase 1+.
+// Types plus structural validators only.
 
 export type Result<T> = { ok: true; value: T } | { ok: false; errors: string[] };
 
@@ -154,7 +154,7 @@ export interface Finding {
   /** Exact steps or request that reproduce it. Required for confirmed findings. */
   reproduction?: string;
   replays?: { passed: number; total: number };
-  /** Permanent regression scenario (`RS-NNNN`) created when a finding is confirmed. */
+  /** Identifier assigned to a confirmed finding (`RS-NNNN`); the scenario itself is written separately. */
   regressionId?: string;
   /** For needs_validation: the exact unresolved fact. */
   unresolvedFact?: string;

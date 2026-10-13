@@ -1,9 +1,12 @@
-// The five oracles are deterministic and boring. Phase 1 implements the three the probes need; metamorphic and state land with their packs.
+// The five oracles are deterministic and boring.
 import type { Response } from "./http.ts";
 
 export interface Verdict {
+  /** Never true for a skipped probe: a probe that did not run verified nothing. Consumers must check `skipped` before reading `passed` as a failure. */
   passed: boolean;
   evidence: string;
+  /** Third outcome, "not applicable": the reason the target does not have the feature this probe exercises. Not a pass, not a finding. */
+  skipped?: string;
 }
 
 /** Canary: a marker planted in tenant A must not appear anywhere in tenant B's world. */

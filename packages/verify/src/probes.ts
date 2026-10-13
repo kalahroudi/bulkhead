@@ -42,6 +42,8 @@ const sessionOf = (r: Response) => setCookies(r).map((c) => new RegExp(`^${SESSI
 const withCookie = (token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}` } });
 /** A cookie-authenticated write, with the same-origin Origin a browser always sends (the gate refuses cookie writes with neither Origin nor Sec-Fetch-Site). */
 const cookieWrite = (host: string, token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}`, origin: `http://${host}` } });
+/** Third outcome: the target does not have the feature this probe exercises. Not a pass and never a finding. */
+const skip = (reason: string, reproduction: string) => ({ passed: false, evidence: reason, skipped: reason, reproduction });
 const fail = (evidence: string, reproduction: string) => ({ passed: false, evidence, reproduction });
 
 /** A throwaway tenant with an owner who is signed in. Every step must succeed or the probe fails (setup is not a pass). */
@@ -169,6 +171,8 @@ export const probes: Probe[] = [
     oracle: "state", // verdict hinges on tenant state (plan) staying unchanged, plus a spec status check
     async run({ req, host, webhookSecret }) {
       const t = host("hook-a");
+      const absent = await req(t, "GET", "/plan");
+      if (absent.status === 404) return skip("target has no billing routes (GET /plan is 404)", `GET /plan on Host: ${t} answered 404, so the billing routes are absent and BILL-2 does not apply.`);
       const body = json({ plan: "pro" });
       const forged = await req(t, "POST", "/webhooks/billing", { body, headers: { "x-signature": createHmac("sha256", "not-the-secret").update(body).digest("hex") } });
       const plan = await req(t, "GET", "/plan");
@@ -549,7 +553,7 @@ export const probes: Probe[] = [
     oracle: "spec",
     async run(ctx) {
       const { req } = ctx;
-      const reproduction = "As owner, mint a member key with private:read. The real key reaches /private/member. Then present 'Bearer bkk_<real id>_<43 wrong base64url chars>' (a random secret, and the real secret with its last character changed): each must be 401, identical to a key with an unknown id.";
+      const reproduction = "As owner, mint a member key with private:read. The real key reaches /private/member. Then present 'Bearer bkk_<real id>_<43 wrong base64url chars>' with a random secret and near-misses (the real secret with its first, middle or last character changed, truncated by one or to half, one character appended, a long suffix appended): each must be 401, identical to a key with an unknown id.";
       const t = await ownerTenant(ctx, "keysecret", reproduction);
       if ("error" in t && t.error) return t.error;
       const { h, token } = t as Extract<typeof t, { h: string }>;
@@ -562,17 +566,26 @@ export const probes: Probe[] = [
       const brokenReal = requireSetup(real, "presenting the real key", reproduction);
       if (brokenReal) return brokenReal;
       const secret = key.slice("bkk_".length + 16 + 1);
-      const flipped = `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`;
-      const wrongRandom = await req(h, "GET", "/private/member", bearer(`bkk_${id}_${randomBytes(32).toString("base64url")}`));
-      const wrongLast = await req(h, "GET", "/private/member", bearer(`bkk_${id}_${flipped}`));
+      const flipAt = (i: number) => `${secret.slice(0, i)}${secret[i] === "A" ? "B" : "A"}${secret.slice(i + 1)}`;
       const unknown = await req(h, "GET", "/private/member", bearer(`bkk_${randomBytes(8).toString("hex")}_${randomBytes(32).toString("base64url")}`));
-      const same = (r: Response, label: string) => differentialOracle(unknown, r, label);
+      const variants: { name: string; secret: string }[] = [
+        { name: "a random wrong secret", secret: randomBytes(32).toString("base64url") },
+        { name: "the real secret's last character changed", secret: flipAt(secret.length - 1) },
+        { name: "the real secret's first character changed", secret: flipAt(0) },
+        { name: "the real secret's middle character changed", secret: flipAt(Math.floor(secret.length / 2)) },
+        { name: "the real secret truncated by one character", secret: secret.slice(0, -1) },
+        { name: "the real secret truncated to half its length", secret: secret.slice(0, Math.floor(secret.length / 2)) },
+        { name: "the real secret with one extra character appended", secret: `${secret}A` },
+        { name: "the real secret with a long suffix appended", secret: `${secret}${randomBytes(32).toString("base64url")}` },
+      ];
+      const answers = await Promise.all(variants.map(async (v) => ({ ...v, res: await req(h, "GET", "/private/member", bearer(`bkk_${id}_${v.secret}`)) })));
       return {
         ...specOracle([
           { name: "unknown key id is refused (baseline)", ok: unknown.status === 401, detail: `HTTP ${unknown.status} ${unknown.body}` },
-          { name: "real id with a random wrong secret is refused with 401", ok: wrongRandom.status === 401, detail: `HTTP ${wrongRandom.status} ${wrongRandom.body}` },
-          { name: "real id with the real secret's last character changed is refused with 401", ok: wrongLast.status === 401, detail: `HTTP ${wrongLast.status} ${wrongLast.body}` },
-          { name: "wrong secret answers exactly like an unknown id", ok: same(wrongRandom, "random wrong secret").passed && same(wrongLast, "near-miss secret").passed, detail: `${same(wrongRandom, "random wrong secret").evidence}; ${same(wrongLast, "near-miss secret").evidence}` },
+          ...answers.flatMap((a) => [
+            { name: `real id with ${a.name} is refused with 401`, ok: a.res.status === 401, detail: `HTTP ${a.res.status} ${a.res.body}` },
+            { name: `real id with ${a.name} answers exactly like an unknown id`, ok: differentialOracle(unknown, a.res, a.name).passed, detail: differentialOracle(unknown, a.res, a.name).evidence },
+          ]),
         ]),
         reproduction,
       };
@@ -640,7 +653,7 @@ export const probes: Probe[] = [
     oracle: "differential",
     async run(ctx) {
       const { req } = ctx;
-      const reproduction = "Create a second owner (so 'last owner' protection cannot mask anything) and an admin. As the admin: PATCH /users/<admin id>/role {role:owner}, PATCH /users/<first owner id>/role {role:member} and DELETE /users/<first owner id> must each be 403. Afterwards the first owner is still an enabled owner and the admin is still an admin.";
+      const reproduction = "Create a second owner (so 'last owner' protection cannot mask anything) and an admin. As the admin, first POST /users {role:member} with the same cookie and headers (positive control, must be 201). Then PATCH /users/<admin id>/role {role:owner}, PATCH /users/<first owner id>/role {role:member} and DELETE /users/<first owner id> must each be 403. Afterwards the first owner is still an enabled owner and the admin is still an admin.";
       const t = await ownerTenant(ctx, "roleauth", reproduction);
       if ("error" in t && t.error) return t.error;
       const { h, token, addUser, loginAs } = t as Extract<typeof t, { h: string }>;
@@ -661,6 +674,9 @@ export const probes: Probe[] = [
       const owner = before.users.find((u) => u.email === "owner@probe.test");
       if (!owner || owner.role !== "owner") return fail("setup: the first owner is not listed with role owner", reproduction);
 
+      // Positive control: the same admin cookie through the same cookieWrite helper must be able to do an allowed write,
+      // so the 403s below cannot be the answer of some other gate (CSRF/origin, session) that would refuse everything.
+      const control = await req(h, "POST", "/users", { ...cookieWrite(h, admin.token), body: json({ email: "control-member@probe.test", password: PASSWORD, role: "member" }) });
       const selfUp = await req(h, "PATCH", `/users/${added.id}/role`, { ...cookieWrite(h, admin.token), body: json({ role: "owner" }) });
       const demoteOwner = await req(h, "PATCH", `/users/${owner.id}/role`, { ...cookieWrite(h, admin.token), body: json({ role: "member" }) });
       const removeOwner = await req(h, "DELETE", `/users/${owner.id}`, cookieWrite(h, admin.token));
@@ -672,6 +688,7 @@ export const probes: Probe[] = [
       const ownerRoute = await req(h, "GET", "/private/owner", withCookie(token));
       return {
         ...specOracle([
+          { name: "positive control: the same admin cookie can POST /users to create a member (201), so the denials below come from the authority rule", ok: control.status === 201, detail: `HTTP ${control.status} ${control.body}` },
           { name: "admin cannot PATCH their own role to owner", ok: selfUp.status === 403, detail: `HTTP ${selfUp.status} ${selfUp.body}` },
           { name: "admin cannot PATCH the owner's role", ok: demoteOwner.status === 403, detail: `HTTP ${demoteOwner.status} ${demoteOwner.body}` },
           { name: "admin cannot DELETE the owner", ok: removeOwner.status === 403, detail: `HTTP ${removeOwner.status} ${removeOwner.body}` },
@@ -724,7 +741,7 @@ export const probes: Probe[] = [
     oracle: "spec",
     async run(ctx) {
       const { req } = ctx;
-      const reproduction = "As owner, create an admin and mint two keys. GET /users and GET /api-keys must be 200 and contain none of: pbkdf2, password_hash, secret_hash, password, or either minted key's secret.";
+      const reproduction = "As owner, create an admin and mint two keys. GET /users and GET /api-keys must be 200 and contain none of: pbkdf2, password_hash, secret_hash, password, either minted key's secret, a 64-hex-digit string, 'pbkdf2-sha256$' or a 43-character base64url token.";
       const t = await ownerTenant(ctx, "listing", reproduction);
       if ("error" in t && t.error) return t.error;
       const { h, token, addUser } = t as Extract<typeof t, { h: string }>;
@@ -744,10 +761,19 @@ export const probes: Probe[] = [
       const brokenKeys = requireSetup(keysList, "GET /api-keys as the owner (a 4xx would read as 'nothing leaked')", reproduction);
       if (brokenKeys) return brokenKeys;
       const needles = ["pbkdf2", "password_hash", "secret_hash", "password"];
+      // Shapes of secret material. Legitimate values in a listing never match: ids are UUIDs (36 chars with hyphens) or 16 hex digits,
+      // timestamps are numbers, and emails/names contain '@', '.' or are short. A bare 43-char run of [A-Za-z0-9_-] is the shape of a
+      // 32-byte base64url key secret or password hash; 64 hex digits is a SHA-256 digest; "$" in a hash breaks the runs, so the prefix is checked on its own.
+      const shapes: { label: string; re: RegExp }[] = [
+        { label: "a 64-hex-digit string (SHA-256 digest)", re: /[0-9a-f]{64}/i },
+        { label: "'pbkdf2-sha256$' (password hash)", re: /pbkdf2-sha256\$/i },
+        { label: "a 43-character base64url token (key secret or hash shape)", re: /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/ },
+      ];
       const checks = [{ where: "GET /users", res: users }, { where: "GET /api-keys", res: keysList }].flatMap(({ where, res }) => {
         const body = res.body.toLowerCase();
         return [
           ...needles.map((n) => ({ name: `${where} has no '${n}'`, ok: !body.includes(n), detail: "found in the response body" })),
+          ...shapes.map((sh) => ({ name: `${where} has no ${sh.label}`, ok: !sh.re.test(res.body), detail: `matched ${sh.re} in the response body` })),
           ...secrets.map((s, i) => ({ name: `${where} does not contain minted key secret #${i + 1}`, ok: !res.body.includes(s), detail: "the secret reappears in a listing" })),
         ];
       });

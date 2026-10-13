@@ -6,7 +6,7 @@ const ALL = [
   "missing-tenant-filter", "shared-cache-key", "skipped-signature-check", "tenant-from-header",
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
   "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
-  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors",
+  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors", "key-secret-length-ignored",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -62,7 +62,7 @@ function principal(tenant: string, headers: Record<string, string | string[] | u
   if (authz) {
     const m = /^Bearer bkk_([0-9a-f]{16})_(\S+)$/.exec(authz);
     const k = m && keys.get(m[1] as string);
-    if (!k || (k.secret !== m[2] && !bugs.has("key-secret-unchecked"))) return null;
+    if (!k || (k.secret !== m[2] && !bugs.has("key-secret-unchecked") && !(bugs.has("key-secret-length-ignored") && (m[2] as string).startsWith(k.secret)))) return null;
     if (k.revoked && !bugs.has("key-revocation-ignored")) return null;
     if (k.tenant !== tenant && !bugs.has("api-key-cross-tenant")) return null;
     return { role: k.role, perms: k.permissions, id: `key:${m[1]}` };
