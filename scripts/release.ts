@@ -2,7 +2,7 @@
 // when the remote has none), tags it, and publishes the four packages to npm. You run it by hand.
 //
 //   node scripts/release.ts <version> [--dry-run] [--yes] [--author "Name <you@example.com>"]
-//                           [--remote=<git url>] [--out=<dir>] [--skip-git] [--skip-npm] [--adopt-existing] [--sign]
+//                           [--repo owner/name] [--remote=<git url>] [--out=<dir>] [--skip-git] [--skip-npm] [--adopt-existing] [--sign]
 //
 // Needs: git 2.32+, git push access to the public repo, `npm login` as a member of the @kalahroudi scope (npm prompts for your
 // one-time code at each publish; it is never passed on a command line),
@@ -18,13 +18,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { PACKAGES, PUBLIC_REPO, buildExport, catalogIdsFromTarball, changelogSection, commitToPublicRepo, git, gitVersionOk, npmTag, planPublicRepo, redact, refuseIfPrivateRemote, resolveIdentity, scanForLeaks, scanTarball, snapshot, tarballManifest, validVersion, verifyTagMatchesExport } from "../release/lib.ts";
+import { PACKAGES, PUBLIC_SLUG, publicUrlOf, buildExport, catalogIdsFromTarball, changelogSection, commitToPublicRepo, git, gitVersionOk, npmTag, planPublicRepo, redact, refuseIfPrivateRemote, resolveIdentity, scanForLeaks, scanTarball, snapshot, tarballManifest, validVersion, verifyTagMatchesExport } from "../release/lib.ts";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     "dry-run": { type: "boolean", default: false }, yes: { type: "boolean", default: false }, author: { type: "string" },
-    remote: { type: "string", default: PUBLIC_REPO }, out: { type: "string" },
+    repo: { type: "string", default: PUBLIC_SLUG }, remote: { type: "string" }, out: { type: "string" },
     "skip-git": { type: "boolean", default: false }, "skip-npm": { type: "boolean", default: false },
     "adopt-existing": { type: "boolean", default: false }, sign: { type: "boolean", default: false },
   },
@@ -32,7 +32,10 @@ const { values, positionals } = parseArgs({
 const root = join(import.meta.dirname, "..");
 const version = positionals[0] as string;
 const dry = values["dry-run"] as boolean;
-const remote = values.remote as string;
+const slug = values.repo as string;
+if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(slug)) { console.error("\nrelease aborted: --repo must look like owner/name"); process.exit(1); }
+// `--remote` overrides the git URL only (for a local rehearsal); package metadata and site links always follow --repo.
+const remote = (values.remote as string | undefined) ?? `${publicUrlOf(slug)}.git`;
 const say = (m: string) => console.log(`\n== ${m}`);
 // Anything that may hold a credential or a full copy of the export is removed when the command ends, however it ends.
 const scratch: string[] = [];
@@ -68,7 +71,7 @@ mkdirSync(base, { recursive: true });
 const exportDir = join(base, "export");
 scratch.push(join(base, "public-repo"), join(base, "public-plan"), join(base, "public-check"), join(base, ".empty-template"));
 if (!values.out) scratch.push(base);
-const files = buildExport({ root, out: exportDir, version });
+const files = buildExport({ root, out: exportDir, version, slug });
 console.log(`${files.length} files exported to ${exportDir}`);
 
 say("Scan the export for private material");
