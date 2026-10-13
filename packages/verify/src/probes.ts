@@ -171,10 +171,11 @@ export const probes: Probe[] = [
     oracle: "state", // verdict hinges on tenant state (plan) staying unchanged, plus a spec status check
     async run({ req, host, webhookSecret }) {
       const t = host("hook-a");
-      const absent = await req(t, "GET", "/plan");
-      if (absent.status === 404) return skip("target has no billing routes (GET /plan is 404)", `GET /plan on Host: ${t} answered 404, so the billing routes are absent and BILL-2 does not apply.`);
       const body = json({ plan: "pro" });
+      const planBefore = await req(t, "GET", "/plan");
       const forged = await req(t, "POST", "/webhooks/billing", { body, headers: { "x-signature": createHmac("sha256", "not-the-secret").update(body).digest("hex") } });
+      // Not applicable only when BOTH the plan route and the webhook route are absent; one 404 alone (an unprovisioned tenant host, a plan served elsewhere) proves nothing.
+      if (planBefore.status === 404 && forged.status === 404) return skip("target has no billing routes (GET /plan and POST /webhooks/billing are both 404)", `GET /plan and a forged POST /webhooks/billing on Host: ${t} both answered 404, so the billing routes are absent and BILL-2 does not apply.`);
       const plan = await req(t, "GET", "/plan");
       const genuine = await req(t, "POST", "/webhooks/billing", { body: json({ plan: "free" }), headers: { "x-signature": createHmac("sha256", webhookSecret).update(json({ plan: "free" })).digest("hex") } });
       return {

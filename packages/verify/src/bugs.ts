@@ -36,4 +36,6 @@ export const seededBugs: SeededBug[] = [
   { id: "unknown-email-login-errors", description: "Login for an unknown email fails with a 500 instead of the same 401 as a wrong password", probeIds: ["unknown-email-login-same-answer"] },
   { id: "key-secret-length-ignored", description: "An API key is accepted when the presented secret merely starts with the real one (extra characters appended)", probeIds: ["key-wrong-secret-denied"] },
   { id: "admin-user-create-refused", description: "POST /users refuses every admin with 403, so an admin's denials on role changes prove nothing (the positive control must catch this)", probeIds: ["role-change-authority"] },
+  { id: "listing-leaks-digest", description: "GET /users carries a neutrally named field (digest) holding a 64-hex-digit string", probeIds: ["listings-hide-secrets"] },
+  { id: "listing-leaks-token", description: "GET /api-keys carries a neutrally named field (x) holding a 43-character base64url token", probeIds: ["listings-hide-secrets"] },
 ];

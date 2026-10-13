@@ -139,6 +139,7 @@ export async function verifyTarget(target: URL, log: EventLog, rules?: readonly 
   const results = await runProbes(target, selected, bootstrapToken);
   const findings: Finding[] = [];
   const notApplicable = results.filter((x) => x.skipped !== undefined);
+  const ran = results.length - notApplicable.length;
   for (const r of results.filter((x) => !x.passed && x.skipped === undefined)) {
     const n = findings.length + 1;
     const f: Finding = {
@@ -157,6 +158,6 @@ export async function verifyTarget(target: URL, log: EventLog, rules?: readonly 
     findings.push(f);
     log.append("finding.recorded", { finding: f, evidence: r.evidence });
   }
-  log.append("verify.run", { phase: "finished", valid: true, passed: findings.length === 0, probes: results.length, skipped: skipped.map((p) => p.id), notApplicable: notApplicable.map((r) => ({ probe: r.probe.id, rule: r.probe.ruleId, reason: r.skipped })), findings: findings.length });
+  log.append("verify.run", { phase: "finished", valid: true, passed: ran > 0 && findings.length === 0, probes: ran, skipped: skipped.map((p) => p.id), notApplicableCount: notApplicable.length, notApplicable: notApplicable.map((r) => ({ probe: r.probe.id, rule: r.probe.ruleId, reason: r.skipped })), findings: findings.length });
   return { valid: true, skipped, results, findings, selfCheck: sc };
 }

@@ -41,7 +41,8 @@ if (cmd === "selfcheck") {
   const applied = report.results.filter((r) => r.skipped === undefined);
   if (report.skipped.length) console.log(`Skipped by rule filter: ${report.skipped.map((p) => `${p.ruleId} ${p.id}`).join(", ")}`);
   coverage(applied.map((r) => r.probe.ruleId));
-  console.log(`${report.findings.length} confirmed finding(s). ${LIMITS}`);
+  const na = report.results.length - applied.length;
+  console.log(`${report.findings.length} confirmed finding(s).${na ? ` ${na} probe(s) not applicable.` : ""} ${LIMITS}`);
   if (applied.length === 0) { console.error("no selected probe applied to this target; nothing was verified"); process.exit(2); }
   process.exit(report.findings.length ? 1 : 0);
 } else {
