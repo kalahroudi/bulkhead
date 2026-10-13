@@ -18,8 +18,12 @@ separate attacker session to review the catalog. This record lists those edits a
   pattern already recorded for the other session probes.
 - Builder, `packages/verify/src/probes.ts`: `notes-list-canary` and `cache-canary` now require a 2xx on the
   observing read. Before, a 404 or 500 on tenant B read as "marker absent" and passed vacuously.
-- `packages/spec/src/decisions.ts`, `scripts/lint-decisions.ts`, `test/decisions.test.ts`, and `lint` now also runs the
+- `packages/spec/src/decisions.ts`, `packages/spec/scripts/lint-decisions.ts`, `test/decisions.test.ts`, and the spec `lint` script now also runs the
   decision lint, so `pnpm spec:lint` (part of every gate) enforces it.
+- Outside frozen paths: `scripts/verify-mutations.ts` (now loads the catalog from verify, supports `also` edits and
+  `--catalog`), `scripts/mutation-selfcheck.ts` (new), `scripts/mutations.ts` (deleted, moved), root `package.json`
+  (`gate:phase4`), one new unit test in `packages/auth/test/auth.test.ts`, and `CLAUDE.md`/`AGENTS.md` (current state,
+  gate commands, and a "Discipline for every change" ground rule).
 
 ## Decision
 1. **The catalog lives in `packages/verify/src/mutations.ts`** and holds 27 entries. Entries may carry `also`
@@ -30,10 +34,10 @@ separate attacker session to review the catalog. This record lists those edits a
    clean baseline. Gaps are printed on every run. Check: `mutation:key-secret-not-compared`, `mutation:bootstrap-token-unchecked`, `mutation:user-list-leaks-password-hash`.
 4. **The gate must be shown able to fail.** `scripts/mutation-selfcheck.ts` feeds the runner a survivor, a
    mis-attributed kill and a stale entry and requires it to reject all three; `gate:phase4` runs it before the
-   catalog. A baseline that already fails is an error. Check: `script:scripts/mutation-selfcheck.ts`, `gate:phase4`.
+   catalog. A baseline that already fails is an error. The self-check covers a survivor, a mis-attributed kill, a stale `find`, a stale `also` edit and a gap nothing protects; the baseline-already-failing branch cannot be fed by a catalog and was checked once by hand (broke the real CSRF line, runner exited 1). Check: `script:scripts/mutation-selfcheck.ts`, `gate:phase4`.
 5. **Decision records are linted and resolved.** Each numbered choice in a record that names rules cites
    `Check:` refs or says `No check:` with a reason; refs must resolve to a real probe, catalog entry, test title,
-   script or gate. DR-0005 to DR-0008 were annotated; no decision text changed. Check: `test:packages/spec/test/decisions.test.ts::a choice with neither Check nor No check fails`, `test:packages/verify/test/decisions.test.ts::every ref`.
+   script or gate. DR-0005 to DR-0008 were annotated; no decision text changed. The parser normalises CRLF, accepts `1.`/`1)` and indented numbering, reads every Decision heading, and flags a Rules header it cannot parse or a missing Decision section. A `test:` ref must match a `test(...)` declaration, not any text in the file. Check: `test:packages/spec/test/decisions.test.ts::a choice with neither Check nor No check fails`, `test:packages/spec/test/decisions.test.ts::a parser blind spot cannot hide a choice`, `test:packages/verify/test/decisions.test.ts::every ref`.
 6. **Defects found by the attacker pass and fixed here:** vacuous canary reads (above); no test that listings
    hide hash material (`mutation:user-list-leaks-password-hash` survived every probe and every unit test, so a
    unit test was added); the role-change mutation was split into two so each revocation is attributed. Check: `mutation:user-list-leaks-password-hash`, `mutation:role-change-keeps-keys`, `probe:notes-list-canary`.

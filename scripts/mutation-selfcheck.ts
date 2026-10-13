@@ -14,6 +14,10 @@ writeFileSync(catalog, `export const mutations = [
   { id: "canary-survivor", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "// Compare against a hash even when the key is unknown so lookups take the same path.", replace: "// edited", expect: ["csrf-origin"] },
   // Mis-attribution: a real CSRF break, claimed to be caught by a different probe.
   { id: "canary-misattributed", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "return new URL(origin).host === new URL(req.url).host;", replace: "return true;", expect: ["cookie-flags"] },
+  // Gap survivor: a gap entry whose mutation breaks neither a probe nor a unit test must fail the gate.
+  { id: "canary-gap-survivor", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "// Compare against a hash even when the key is unknown so lookups take the same path.", replace: "// edited for the gap canary", expect: [], gap: "canary: nothing protects a comment" },
+  // Stale second edit: an `also` edit that matches nothing must error too, not be skipped.
+  { id: "canary-also-stale", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "return new URL(origin).host === new URL(req.url).host;", replace: "return true;", also: [{ file: ${JSON.stringify(AUTH)}, find: "this text is not in the file either", replace: "x" }], expect: ["csrf-origin"] },
   // Stale entry: the line it targets does not exist, which must error instead of being skipped.
   { id: "canary-stale", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "this text is not in the file", replace: "x", expect: ["csrf-origin"] },
 ];\n`);
@@ -22,6 +26,8 @@ const must: [string, RegExp][] = [
   ["a survivor", /FAIL canary-survivor .*SURVIVED/],
   ["a mis-attributed kill", /FAIL canary-misattributed .*SURVIVED.*mis-attributed/],
   ["a stale find string", /FAIL canary-stale: find string matched 0 time/],
+  ["a gap nothing protects", /FAIL canary-gap-survivor .*SURVIVED verify and unit tests/],
+  ["a stale `also` edit", /FAIL canary-also-stale: find string matched 0 time/],
 ];
 try {
   const r = spawnSync(process.execPath, [join(import.meta.dirname, "verify-mutations.ts"), "--catalog", catalog], { encoding: "utf8", timeout: 600_000 });

@@ -29,3 +29,19 @@ test("records without a Rules header, and prose-only decisions, have nothing to 
   assert.deepEqual(codes("# DR\n\n- Status: x\n\n## Decision\n1. nothing checked\n"), []);
   assert.deepEqual(codes(record("Prose only, no list.")), []);
 });
+
+test("a parser blind spot cannot hide a choice: CRLF, indented and 1) numbering, a second Decision heading, odd Rules headers", () => {
+  const md = record("1. Fine. Check: `gate:phase4`.").replace(/\n/g, "\r\n");
+  assert.deepEqual(codes(md), []);
+  assert.deepEqual(codes(record("1. A choice with nothing.").replace(/\n/g, "\r\n")), ["unchecked-decision"]);
+  assert.deepEqual(codes(record("  1. Indented choice with nothing.")), ["unchecked-decision"]);
+  assert.deepEqual(codes(record("1) Paren choice with nothing.")), ["unchecked-decision"]);
+  assert.deepEqual(codes(record("1. Ok. Check: `gate:phase4`.") + "\n\n## Decision\n2. Second heading, nothing.\n"), ["unchecked-decision"]);
+  assert.deepEqual(codes(record("1. Thing.").replace("- Rules: AUTH-2", "* Rules: AUTH-2")), ["unchecked-decision"]);
+  assert.deepEqual(codes(record("1. Thing.").replace("- Rules: AUTH-2", "Rules - AUTH-2")), ["unparsed-rules-header"]);
+  assert.deepEqual(codes("# DR\n\n- Rules: AUTH-2\n\n## Context\nno decision heading\n"), ["missing-decision-section"]);
+});
+
+test("a Check with no ref fails even when a No check sentence is present in the same choice", () => {
+  assert.deepEqual(codes(record("1. Thing. Check: covered somewhere. No check: the rest cannot be tested until it exists.")), ["check-without-ref"]);
+});

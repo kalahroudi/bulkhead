@@ -76,14 +76,14 @@ export const mutations: Mutation[] = [
     find: " and u.disabled = 0`",
     replace: "`",
     expect: [],
-    gap: "no black-box probe disables a user and then retries; covered by auth unit tests only (DR-0006 known limits)",
+    gap: "disable revokes sessions and keys first, so over HTTP this check is shadowed by revocation (defence in depth); covered by auth unit tests only",
   },
   {
     id: "key-ignores-disabled", rule: "AUTH-4", file: AUTH,
     find: "row.user_disabled !== 0 || ",
     replace: "",
     expect: [],
-    gap: "no black-box probe disables a user and then retries; covered by auth unit tests only (DR-0006 known limits)",
+    gap: "disable revokes sessions and keys first, so over HTTP this check is shadowed by revocation (defence in depth); covered by auth unit tests only",
   },
   {
     id: "login-ignores-disabled", rule: "AUTH-2", file: ROUTES,
