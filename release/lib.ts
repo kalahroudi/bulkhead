@@ -47,10 +47,10 @@ export const FIXES: Fix[] = [
   { file: "packages/core/src/tenant/types.ts", find: "Development stopgap until Phase 6 provisioning.", replace: "Development stopgap until tenant provisioning exists." },
   { file: "packages/core/src/api/app.ts", find: "Plan entitlements arrive in Phase 5.", replace: "Plan entitlements are planned." },
   { file: "packages/spec/src/types.ts", find: "The scenario is written in Phase 1+.", replace: "The scenario is written as the rule is verified." },
-  { file: "packages/spec/src/formats.ts", find: "arrive in Phase 1+.", replace: "are planned." },
+  { file: "packages/spec/src/formats.ts", find: " Hashing, signing and chain verification arrive in Phase 1+.", replace: "" },
   { file: "packages/spec/src/rules.ts", find: " (Phase 1+).", replace: "." },
   { file: "examples/demo-app/scripts/manifest.ts", find: "which CODEOWNERS routes to the owner (ROUTE-3)", replace: "so that review can see it" },
-  { file: "packages/verify/src/oracles.ts", find: "Phase 1 implements the three the probes need; metamorphic and state land with their packs.", replace: "Three are implemented today because the probes need them; metamorphic and state land with their packs." },
+  { file: "packages/verify/src/oracles.ts", find: " Phase 1 implements the three the probes need; metamorphic and state land with their packs.", replace: "" },
   { file: "packages/verify/test/verify.test.ts", find: " (Phase 1 gate)", replace: "" },
   { file: "scripts/verify-demo.ts", find: "// Phase 2 gate harness:", replace: "// Gate harness:" },
   // The event-log viewer is internal tooling and does not ship, so its workspace entry leaves the lockfile too.
@@ -62,7 +62,7 @@ export const FIXES: Fix[] = [
   // The public spec package: rule catalog, classification, findings and the event log. Decision records, attestations and
   // agent or review events are the project's own workflow and do not ship.
   { file: "packages/spec/src/index.ts", find: 'export { CHECK_KINDS, decisionItems, lintDecisionRecord, type DecisionItem } from "./decisions.ts";\n', replace: "" },
-  { file: "packages/spec/src/formats.ts", find: "// Format definitions: data classification, decision records, attestations, events.", replace: "// Format definitions: data classification, findings, events." },
+  { file: "packages/spec/src/formats.ts", find: "// Format definitions: data classification, decision records, attestations, events.", replace: "// Format definitions: findings and events." },
   { file: "packages/spec/src/formats.ts", find: 'export const EVENT_TYPES = [\n  "commit.scan",\n  "verify.run",\n  "finding.recorded",\n  "review.requested",\n  "review.signed",\n  "agent.blocked",\n  "agent.question",\n  "fleet.run",\n  "attestation.issued",\n  "deploy.checked",\n] as const;', replace: 'export const EVENT_TYPES = ["verify.run", "finding.recorded"] as const;' },
   { file: "packages/spec/src/formats.ts", find: "e.g. `verify`, `cli`, `hook`.", replace: "e.g. `verify`." },
   { file: "packages/spec/src/types.ts", find: "contract: changes by proposal and human sign-off. default: agents may change freely.", replace: "contract: changes only by an explicit proposal. default: may change freely." },
@@ -72,6 +72,13 @@ export const FIXES: Fix[] = [
   { file: "packages/spec/src/types.ts", find: " An attestation names the spec version it was issued against.", replace: "" },
   { file: "packages/spec/src/lint.ts", find: '    if (!Number.isInteger(r.principle) || r.principle < 1 || r.principle > 9) add(r.id, "bad-principle", "principle must be 1-9");\n', replace: "" },
   { file: "packages/spec/src/rules.ts", find: "Commit-tier route manifest check;", replace: "Route manifest check;" },
+  { file: "packages/spec/src/rules.ts", find: "Verify session and cookie scenario pack.", replace: "Verify session and cookie scenarios." },
+  { file: "packages/spec/src/rules.ts", find: "Verify token scope scenarios and storage inspector.", replace: "Verify token scope scenarios." },
+  { file: "packages/spec/src/rules.ts", find: "Verify messaging pack: forged, replayed and out-of-order deliveries.", replace: "Verify scenarios: forged, replayed and out-of-order deliveries." },
+  { file: "packages/spec/src/types.ts", find: "startup check, hook, or verify scenario.", replace: "startup check, or verify scenario." },
+  { file: "packages/spec/src/formats.ts", find: "Permanent regression scenario (`RS-NNNN`) created when a finding is confirmed.", replace: "Identifier of the regression scenario for a confirmed finding (`RS-NNNN`)." },
+  { file: "scripts/build-package.ts", find: "  // The mutation catalog names repo-internal paths and is only used by the repo's own gate, so it is not published.\n  exclude: includeFixture ? [\"src/mutations.ts\"] : [],\n", replace: "" },
+  { file: "scripts/consumer-test.ts", find: "    check(!files.some((f) => /mutations\\.(js|d\\.ts)$/.test(f)), `${t.split(\"/\").pop()}: the repo-internal mutation catalog is not shipped`);\n", replace: "" },
   { file: "packages/spec/README.md", find: "data-classification and decision-record formats, and linters (`lintSpec`, `lintDecisionRecord`).", replace: "data-classification, finding and event-log formats, and a linter (`lintSpec`)." },
   { file: "packages/core/src/tenant/directory.ts", find: "arrive in later phases (TENANT-3).", replace: "arrive later (TENANT-3)." },
   { file: ".gitignore", find: "\n.commandcode/", replace: "" },
@@ -87,6 +94,7 @@ export const FIXES: Fix[] = [
 
 // --- The public rule catalog: product guarantees only. How the project is built, attested and supervised stays private. ---
 const CATALOG_FILE = "packages/spec/src/rules.ts";
+export const UNBUILT_RULES = ["CRYPTO-1", "CRYPTO-2", "CRYPTO-3", "CRYPTO-4", "CRYPTO-5", "BILL-1", "BILL-3", "DOMAIN-1", "HTTP-1", "LIFE-1"];
 /** Rewrites ROUTE-3 as a product guarantee, drops every rule from the Verify section to the end, and removes the internal `principle` field. */
 export function publicCatalog(text: string): string {
   const swap = (from: string, to: string, replacement: string, what: string) => {
@@ -106,6 +114,16 @@ export function publicCatalog(text: string): string {
   },
 `, "the ROUTE-3 block");
   swap("  // --- Verify ---", "];\n\nexport const SPEC_VERSION", "", "the Verify..Plane sections");
+  // Rules for features that do not exist yet are a roadmap, not a guarantee, so they do not ship either.
+  for (const id of UNBUILT_RULES) {
+    const marker = `  {\n    id: "${id}",`;
+    const a = text.indexOf(marker);
+    if (a < 0 || text.indexOf(marker, a + 1) >= 0) throw new Error(`rule catalog layout changed: cannot find ${id} exactly once`);
+    const end = text.indexOf("\n  },\n", a);
+    if (end < 0) throw new Error(`rule catalog layout changed: cannot find the end of ${id}`);
+    text = text.slice(0, a) + text.slice(end + "\n  },\n".length);
+  }
+  text = text.replace(/^  \/\/ --- (Crypto and secrets|Domains and HTTP|Lifecycle) ---\n/gm, "");
   text = text.replace(/^\s+principle: \d,\n/gm, "");
   if (/principle/.test(text)) throw new Error("rule catalog still mentions principle after the cut");
   return text;
@@ -117,32 +135,35 @@ const RULE_REF = /\b(TENANT|ROUTE|AUTH|CRYPTO|BOOT|BILL|DOMAIN|HTTP|LIFE|VERIFY|
 export const LEAK_PATTERNS: [string, RegExp][] = [
   ["private doc or path", /docs\/decisions|SPEC\.md|CLAUDE\.md|AGENTS\.md|FROZEN_PATHS/],
   ["private decision record id", /\bDR-(?!9\d{3}\b)\d{4}\b/],
-  ["roadmap phase reference", /\bPhase \d/],
+  ["roadmap phase reference", /\bphase[ -]?\d/i],
   ["private repository url", /kalahroudi\/bulkhead(?![-\w])/],
   ["agent or session provenance", /claude|anthropic|Co-Authored-By|Claude-Session|attacker session/i],
   ["personal address", /bermouda/i],
   ["unfinished owner todo", /TODO\(owner\)/],
   ["internal process wording", /development plane|agent[- ]harness|signed human review|human key|human sign-off|keychain|frozen path|architecture document|\bfleet\b|attestation|commandcode/i],
-  ["private gate or roadmap name", /gate:phase\d|\bkernel\b/i],
+  ["private gate or roadmap name", /gate:phase\d|\bkernel\b|\broadmap\b|decision records?|mutation (catalog|check)|human review/i],
+  ["other tool or session provenance", /built with cursor|cursor\.(sh|com)|copilot|\bcodex\b|\bgemini\b|session_[0-9A-Za-z]{8,}/i],
   ["agent wording", /\bagents?\b(?!\s+header)/i],
 ];
 /** File and directory names that point at the private build, checked as paths too. */
 export const PATH_PATTERNS: [string, RegExp][] = [["private-build file name", /kernel|phase\d|decision|attest|mutation|plane|SPEC\.md|\.commandcode/i]];
 const TEXT = /\.(ts|js|json|jsonc|md|yml|yaml|html|css|txt|toml)$|(^|\/)(\.gitignore|LICENSE)$/;
 
-export function scanForLeaks(dir: string): string[] {
+export function scanForLeaks(dir: string, catalogRel: string = CATALOG_FILE): string[] {
   const hits: string[] = [];
-  const catalog = join(dir, CATALOG_FILE);
+  const catalog = join(dir, catalogRel);
   const known = existsSync(catalog) ? publicRuleIds(readFileSync(catalog, "utf8")) : null;
   for (const file of walk(dir)) {
     const rel = relative(dir, file);
     for (const [why, re] of PATH_PATTERNS) if (re.test(rel)) hits.push(`${rel} [${why}]`);
-    if (/(^|\/)(pnpm-lock\.yaml)$/.test(rel) || !TEXT.test(rel)) continue;
-    const lines = readFileSync(file, "utf8").split("\n");
-    lines.forEach((line, i) => {
+    if (/(^|\/)(pnpm-lock\.yaml)$/.test(rel)) continue;
+    const buf = readFileSync(file);
+    // Deny by default: a file that cannot be read as text cannot be scanned, so it cannot ship.
+    if (buf.includes(0)) { hits.push(`${rel} [binary file cannot be scanned]`); continue; }
+    buf.toString("utf8").split("\n").forEach((line, i) => {
       for (const [why, re] of LEAK_PATTERNS) if (re.test(line)) hits.push(`${rel}:${i + 1} [${why}] ${line.trim().slice(0, 140)}`);
       // A shipped file may only cite rules that exist in the public catalog; anything else points at the private spec.
-      if (known && rel !== CATALOG_FILE)
+      if (known && rel !== catalogRel && !/(^|\/)rules\.(js|d\.ts)$/.test(rel))
         for (const m of line.matchAll(RULE_REF)) if (!known.has(m[0])) hits.push(`${rel}:${i + 1} [rule id not in the public catalog] ${m[0]}`);
     });
   }
@@ -182,13 +203,19 @@ export function buildExport({ root, out, version, templates = join(root, "releas
     writeFileSync(p, text.replace(fix.find, () => fix.replace));
   }
 
-  // formats.ts: the decision-record and attestation formats are the project's own workflow and do not ship.
+  // formats.ts: the classification format belongs to an unbuilt feature, and the decision-record and attestation formats are the
+  // project's own workflow; none of them ship.
   const formatsPath = join(out, "packages/spec/src/formats.ts");
   const formats = readFileSync(formatsPath, "utf8");
-  const from = formats.indexOf("// --- Decision record ---");
+  const from = formats.indexOf("// --- Data classification ---");
   const to = formats.indexOf("// --- Findings ---");
-  if (from < 0 || to < from || formats.indexOf("// --- Decision record ---", from + 1) >= 0) throw new Error("formats.ts layout changed: cannot find the decision-record..attestation sections exactly once");
+  if (from < 0 || to < from || formats.indexOf("// --- Data classification ---", from + 1) >= 0) throw new Error("formats.ts layout changed: cannot find the classification..attestation sections exactly once");
   writeFileSync(formatsPath, formats.slice(0, from) + formats.slice(to));
+
+  const runPath = join(out, "packages/verify/src/run.ts");
+  const run = readFileSync(runPath, "utf8");
+  if (run.split('export const VERIFY_VERSION = "0.0.0";').length !== 2) throw new Error("run.ts layout changed: VERIFY_VERSION not found exactly once");
+  writeFileSync(runPath, run.replace('export const VERIFY_VERSION = "0.0.0";', () => `export const VERIFY_VERSION = ${JSON.stringify(version)};`));
 
   const catalogPath = join(out, CATALOG_FILE);
   writeFileSync(catalogPath, publicCatalog(readFileSync(catalogPath, "utf8")));
@@ -216,6 +243,7 @@ export function buildExport({ root, out, version, templates = join(root, "releas
     if (dir === "packages/verify" && j.exports) delete j.exports["./mutations"];
     if (dir === ".") {
       j.name = "bulkhead-monorepo";
+      j.engines = { node: ">=22" };
       j.scripts = {
         typecheck: "pnpm -r typecheck",
         test: "pnpm -r test",
@@ -286,11 +314,22 @@ export function resolveIdentity(author: string | undefined, read: (key: string) 
   if (AGENT_IDENTITY.test(name) || AGENT_IDENTITY.test(email)) throw new Error(`the git identity "${name} <${email}>" is a tool identity; pass --author "Your Name <you@example.com>" so the public history carries yours`);
   return { name, email };
 }
-const identityEnv = (id: Identity) => ({ ...process.env, GIT_AUTHOR_NAME: id.name, GIT_AUTHOR_EMAIL: id.email, GIT_COMMITTER_NAME: id.name, GIT_COMMITTER_EMAIL: id.email, GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT ?? "1" });
+/**
+ * The environment for creating the public commit and tag. Unless the releaser opts into signing, nothing from the machine's git
+ * configuration can reach them: no global or system config (so no tool signing key, no template hooks, no commit-msg trailers),
+ * and the identity is set explicitly for author, committer and tagger.
+ */
+function releaseEnv(id: Identity, sign: boolean): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_AUTHOR_NAME: id.name, GIT_AUTHOR_EMAIL: id.email, GIT_COMMITTER_NAME: id.name, GIT_COMMITTER_EMAIL: id.email, GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT ?? "1" };
+  for (const k of Object.keys(env)) if (/^GIT_(CONFIG|DIR|WORK_TREE|INDEX_FILE|NAMESPACE)/.test(k)) delete env[k];
+  if (!sign) { env.GIT_CONFIG_GLOBAL = "/dev/null"; env.GIT_CONFIG_NOSYSTEM = "1"; }
+  return env;
+}
+const isolation = (sign: boolean) => ["-c", "core.hooksPath=/dev/null", ...(sign ? [] : ["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])];
 
 // --- Git: publish the export to the public repo, creating `main` when the remote has none. ---
 export const RELEASE_MARKER = "Release-Tool: bulkhead-release";
-export interface PublishGitOptions { exportDir: string; remote: string; version: string; notes: string; push: boolean; workdir: string; identity: Identity; adopt?: boolean; noSign?: boolean }
+export interface PublishGitOptions { exportDir: string; remote: string; version: string; notes: string; push: boolean; workdir: string; identity: Identity; adopt?: boolean; sign?: boolean }
 
 function lsRemote(remote: string, ref: string): boolean {
   const r = git(["ls-remote", remote, ref], process.cwd());
@@ -324,45 +363,78 @@ export function verifyTagMatchesExport(remote: string, tag: string, exportDir: s
   if (tagged !== treeHash(exportDir)) throw new Error(`the export from this checkout differs from what ${tag} holds on the public repo; publish from the commit that was tagged, not from here`);
 }
 
+/** What publishing would do to the public repo, found out by looking and not by doing. Throws when `main` is history this tool did not write. */
+export interface PublicRepoPlan { exists: boolean; removed: string[]; foreign: string[] }
+export function planPublicRepo(o: { exportDir: string; remote: string; workdir: string; adopt?: boolean }): PublicRepoPlan {
+  if (!remoteHasBranch(o.remote, "main")) return { exists: false, removed: [], foreign: [] };
+  const empty = join(o.workdir, "..", ".empty-template");
+  mkdirSync(empty, { recursive: true });
+  rmSync(o.workdir, { recursive: true, force: true });
+  const c = git(["clone", "--quiet", "--template", empty, "--branch", "main", o.remote, o.workdir], process.cwd());
+  if (c.status !== 0) throw new Error(`clone failed: ${redact(String(c.stderr))}`);
+  const existing = String(git(["ls-files"], o.workdir).stdout).split("\n").filter(Boolean);
+  const incoming = new Set(walk(o.exportDir).map((f) => relative(o.exportDir, f)));
+  const removed = existing.filter((f) => !incoming.has(f));
+  // `main` is a mirror that is replaced wholesale, so any commit this tool did not write would be lost.
+  const foreign = String(git(["log", "--format=%H%x1f%s%x1f%B%x1e", "main"], o.workdir).stdout).split("\x1e").map((x) => x.trim()).filter(Boolean)
+    .filter((x) => !x.split("\x1f")[2]?.includes(RELEASE_MARKER)).map((x) => `${x.slice(0, 9)} ${x.split("\x1f")[1]}`);
+  if (foreign.length && !o.adopt)
+    throw new Error(`main on ${redact(o.remote)} holds ${foreign.length} commit(s) this tool did not write (${foreign.slice(0, 5).join("; ")}). The public repo is a mirror: publishing REPLACES its contents and would remove ${removed.length} file(s)${removed.length ? ` (${removed.slice(0, 20).join(", ")}${removed.length > 20 ? ", ..." : ""})` : ""}. Review it, port anything worth keeping into the private repo, then rerun with --adopt-existing`);
+  return { exists: true, removed, foreign };
+}
+
 export function commitToPublicRepo(o: PublishGitOptions): { created: boolean; commit: string; removed: string[] } {
   const tag = `v${o.version}`;
-  if (remoteHasTag(o.remote, tag)) throw new Error(`the tag ${tag} already exists on ${redact(o.remote)}; pick a new version`);
-  const exists = remoteHasBranch(o.remote, "main");
-  const env = identityEnv(o.identity);
-  rmSync(o.workdir, { recursive: true, force: true });
-  let removed: string[] = [];
-  if (exists) {
-    const c = git(["clone", "--quiet", "--branch", "main", o.remote, o.workdir], process.cwd());
-    if (c.status !== 0) throw new Error(`clone failed: ${redact(String(c.stderr))}`);
-    const last = String(git(["log", "-1", "--format=%B"], o.workdir).stdout);
-    const existing = String(git(["ls-files"], o.workdir).stdout).split("\n").filter(Boolean);
-    const incoming = new Set(walk(o.exportDir).map((f) => relative(o.exportDir, f)));
-    removed = existing.filter((f) => !incoming.has(f));
-    // `main` is replaced wholesale, so refuse to do that to history this tool did not write.
-    if (!last.includes(RELEASE_MARKER) && !o.adopt) throw new Error(`main already exists on ${redact(o.remote)} and was not created by this tool; it would be REPLACED (${removed.length} existing file(s) removed). Review it, then rerun with --adopt-existing if that is intended`);
+  if (remoteHasTag(o.remote, tag)) throw new Error(`the tag ${tag} already exists on ${redact(o.remote)}; pick a new version (if an earlier run pushed it but npm publishing failed, rerun that command with --skip-git instead)`);
+  const sign = Boolean(o.sign);
+  const env = releaseEnv(o.identity, sign);
+  const gi = (args: string[], cwd: string, extra: SpawnSyncOptions = {}) => git([...isolation(sign), ...args], cwd, { env, ...extra });
+  const empty = join(o.workdir, "..", ".empty-template");
+  mkdirSync(empty, { recursive: true });
+  const plan = planPublicRepo({ exportDir: o.exportDir, remote: o.remote, workdir: o.workdir, adopt: o.adopt });
+  if (plan.exists) {
     for (const e of readdirSync(o.workdir)) if (e !== ".git") rmSync(join(o.workdir, e), { recursive: true, force: true });
   } else {
+    rmSync(o.workdir, { recursive: true, force: true });
     mkdirSync(o.workdir, { recursive: true });
-    for (const args of [["init", "--quiet", "-b", "main"], ["remote", "add", "origin", o.remote]]) {
+    for (const args of [["init", "--quiet", "--template", empty, "-b", "main"], ["remote", "add", "origin", o.remote]]) {
       const r = git(args, o.workdir);
       if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${redact(String(r.stderr))}`);
     }
   }
   cpSync(o.exportDir, o.workdir, { recursive: true, filter: (src) => !/(^|\/)\.git$/.test(src) });
-  git(["add", "-A"], o.workdir, { env });
-  if (exists && git(["diff", "--cached", "--quiet"], o.workdir).status === 0) throw new Error("the public repo already has exactly this content; nothing to release");
-  const sign = o.noSign ? ["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"] : [];
-  const message = `${exists ? "Release" : "Initial release"} ${tag}\n\n${o.notes}\n\n${RELEASE_MARKER}\n`;
-  const c = git([...sign, "commit", "--quiet", "-m", message], o.workdir, { env });
-  if (c.status !== 0) throw new Error(`commit failed: ${String(c.stderr)}`);
-  const t = git([...sign, "tag", "-a", tag, "-m", `${tag}\n\n${o.notes}`], o.workdir, { env });
-  if (t.status !== 0) throw new Error(`tag failed: ${String(t.stderr)}`);
+  gi(["add", "-A"], o.workdir);
+  if (plan.exists && git(["diff", "--cached", "--quiet"], o.workdir).status === 0) throw new Error("the public repo already has exactly this content; nothing to release");
+  const message = `${plan.exists ? "Release" : "Initial release"} ${tag}\n\n${o.notes}\n\n${RELEASE_MARKER}\n`;
+  const c = gi(["commit", "--quiet", "-m", message], o.workdir);
+  if (c.status !== 0) throw new Error(`commit failed: ${redact(String(c.stderr))}`);
+  // -F with verbatim cleanup: `-m` would strip every line that starts with `#`, which mangles the changelog headings.
+  const tagFile = join(o.workdir, ".git", "RELEASE_TAGMSG");
+  writeFileSync(tagFile, `${tag}\n\n${o.notes}\n`);
+  const t = gi(["tag", "-a", tag, "-F", tagFile, "--cleanup=verbatim"], o.workdir);
+  if (t.status !== 0) throw new Error(`tag failed: ${redact(String(t.stderr))}`);
   const commit = String(git(["rev-parse", "HEAD"], o.workdir).stdout).trim();
+  assertCleanObjects(o.workdir, tag, o.identity, sign, message);
   if (String(git(["rev-parse", "HEAD^{tree}"], o.workdir).stdout).trim() !== treeHash(o.exportDir)) throw new Error("internal check failed: the commit tree differs from the export");
   // One atomic push of the branch and the tag together: either both land or neither does. Never forced.
-  const push = git(["push", "--atomic", ...(o.push ? [] : ["--dry-run"]), ...(exists ? [] : ["-u"]), "origin", "main", `refs/tags/${tag}`], o.workdir, { stdio: "inherit", env });
+  const push = git(["push", "--atomic", ...(o.push ? [] : ["--dry-run"]), ...(plan.exists ? [] : ["-u"]), "origin", "main", `refs/tags/${tag}`], o.workdir, { stdio: "inherit", env: { ...process.env, GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT ?? "1" } });
   if (push.status !== 0) throw new Error("git push failed (nothing was force-pushed)");
-  return { created: !exists, commit, removed };
+  return { created: !plan.exists, commit, removed: plan.removed };
+}
+
+/** Reads the created commit and tag objects back and refuses to push if they carry anything but the releaser's identity and our message. */
+export function assertCleanObjects(repo: string, tag: string, id: Identity, sign: boolean, message: string): void {
+  const header = (obj: string) => String(git(["cat-file", obj.includes("^{") ? "-p" : "-p", obj], repo).stdout);
+  const commit = header("HEAD");
+  const who = `${id.name} <${id.email}>`;
+  const line = (text: string, key: string) => text.split("\n").find((l) => l.startsWith(`${key} `))?.slice(key.length + 1).replace(/ \d+ [+-]\d{4}$/, "");
+  if (line(commit, "author") !== who || line(commit, "committer") !== who) throw new Error(`the commit is not authored by ${who} (got author "${line(commit, "author")}", committer "${line(commit, "committer")}")`);
+  if (!sign && /^gpgsig/m.test(commit)) throw new Error("the commit carries a signature, but signing was not requested");
+  const body = commit.slice(commit.indexOf("\n\n") + 2).replace(/^gpgsig[\s\S]*?-----END [A-Z ]+-----\n\n?/m, "");
+  if (body.trim() !== message.trim()) throw new Error("the commit message was altered by a hook or template; refusing to push");
+  const tagObj = header(`refs/tags/${tag}`);
+  if (line(tagObj, "tagger") !== who) throw new Error(`the tag is not by ${who} (got "${line(tagObj, "tagger")}")`);
+  if (!sign && /BEGIN (PGP|SSH) SIGNATURE/.test(tagObj)) throw new Error("the tag carries a signature, but signing was not requested");
 }
 
 // --- Tarballs: what npm will actually serve, checked as files and not only as a source tree. ---
@@ -377,7 +449,7 @@ export function scanTarball(tgz: string, scratch: string): string[] {
   try {
     if (spawnSync("tar", ["-xzf", tgz, "-C", dir], { encoding: "utf8" }).status !== 0) return [`${tgz}: cannot extract`];
     const hits = walk(dir).map((f) => relative(join(dir, "package"), f)).filter((f) => !/^(dist\/|README\.md$|LICENSE$|package\.json$)/.test(f)).map((f) => `${f} [file that should not ship in a tarball]`);
-    return [...hits, ...scanForLeaks(dir)];
+    return [...hits, ...scanForLeaks(dir, "package/dist/rules.js")];
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 

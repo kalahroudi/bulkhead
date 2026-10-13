@@ -14,4 +14,4 @@ Please do not open a public issue. Use GitHub's private vulnerability reporting 
 
 ## Scope
 
-Anything that breaks tenant isolation, authorization, session or API-key handling, or the guarantees the verifier claims to check. Known gaps are listed in the README under "Status and limits"; reports about those are welcome but are not new vulnerabilities.
+Anything that breaks tenant isolation, authorization, session or API-key handling, or the guarantees the verifier claims to check. Known gaps are listed in the README and under "Known limits" in the CHANGELOG; reports about those are welcome but are not new vulnerabilities.

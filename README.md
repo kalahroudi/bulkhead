@@ -97,10 +97,10 @@ BULKHEAD_VERIFY_BOOTSTRAP_TOKEN=<the same 32+ character secret> \
   npx @kalahroudi/bulkhead-verify@preview run --target http://127.0.0.1:8787 --rules TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4
 ```
 
-A packaged probe-route helper is planned, not built. `run` refuses non-loopback targets unless you register them. Findings and the event log go to `.bulkhead/`.
+A packaged probe-route helper is planned, not built. `run` refuses non-loopback targets by design. Findings and the event log go to `.bulkhead/`.
 
 ## Status and limits
 
-See [`CHANGELOG.md`](CHANGELOG.md) for what each release contains and [`SECURITY.md`](SECURITY.md) for reporting a vulnerability. Requires Node 22+ for the tooling and a Cloudflare Workers runtime with Durable Objects (SQLite) for the app.
+See [`CHANGELOG.md`](CHANGELOG.md) for what each release contains (including its known limits) and [`SECURITY.md`](SECURITY.md) for reporting a vulnerability. Requires Node 22+ for the tooling and a Cloudflare Workers runtime with Durable Objects (SQLite) for the app.
 
 Licensed under Apache-2.0.

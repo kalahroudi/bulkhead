@@ -22,7 +22,7 @@
   <ul>
     <li><strong>One tenant per hostname.</strong> The tenant comes from the host only, never from a header, query or body.</li>
     <li><strong>One database per tenant.</strong> Each tenant gets its own Durable Object SQLite database behind a scoped handle, so a query cannot name another tenant.</li>
-    <li><strong>No route without a policy.</strong> Every route declares a role, permission or an explicit public reason, or the app refuses to start.</li>
+    <li><strong>No route without a policy.</strong> Every route declares a role (optionally narrowed by a permission) or an explicit public reason, or the app refuses to start.</li>
     <li><strong>Users, sessions and API keys per tenant,</strong> with roles, permissions, immediate revocation and a same-origin check on cookie writes.</li>
     <li><strong>An independent verifier</strong> with probes for tenant isolation and auth, a self-check that proves it catches its own planted bugs, and a black-box run against a live app.</li>
   </ul>

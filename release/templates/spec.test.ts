@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GENESIS_PREV, lintSpec, spec, validateClassification, validateEvent, validateFinding, type Rule } from "../src/index.ts";
+import { GENESIS_PREV, lintSpec, spec, validateEvent, validateFinding, type Rule } from "../src/index.ts";
 
 const h = (c: string) => `sha256:${c.repeat(64)}`;
 
@@ -23,14 +23,6 @@ test("linter catches duplicate IDs, missing fields, bad tier and shared scenario
   const codes = lintSpec({ version: "0.1.0", rules: bad }).map((i) => i.code);
   for (const c of ["duplicate-id", "missing-reason", "bad-tier", "duplicate-scenario", "bad-id", "bad-scenario"])
     assert.ok(codes.includes(c), `expected ${c}, got ${codes.join(",")}`);
-});
-
-test("classification: secrets must be write-only, duplicates rejected", () => {
-  assert.equal(validateClassification({ version: 1, fields: [{ table: "t", field: "f", class: "secret" }] }).ok, false);
-  assert.equal(validateClassification({ version: 1, fields: [{ table: "t", field: "f", class: "secret", writeOnly: true }] }).ok, true);
-  const dup = { table: "t", field: "f", class: "public" };
-  assert.equal(validateClassification({ version: 1, fields: [dup, dup] }).ok, false);
-  assert.equal(validateClassification({ version: 1, fields: [{ table: "t", field: "f", class: "nope" }] }).ok, false);
 });
 
 test("event: genesis uses zero prev, signature required", () => {

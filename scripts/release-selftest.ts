@@ -4,7 +4,8 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FIXES, RELEASE_MARKER, buildExport, publicCatalog, publicRuleIds, changelogSection, commitToPublicRepo, git, npmTag, redact, remoteHasBranch, resolveIdentity, scanForLeaks, scanTarball, shippable, validVersion, verifyTagMatchesExport, walk } from "../release/lib.ts";
+import { spawnSync as run } from "node:child_process";
+import { FIXES, RELEASE_MARKER, assertCleanObjects, planPublicRepo, buildExport, publicCatalog, publicRuleIds, changelogSection, commitToPublicRepo, git, npmTag, redact, remoteHasBranch, resolveIdentity, scanForLeaks, scanTarball, shippable, validVersion, verifyTagMatchesExport, walk } from "../release/lib.ts";
 
 const root = join(import.meta.dirname, "..");
 const CATALOG = "packages/spec/src/rules.ts";
@@ -67,10 +68,10 @@ try {
   // The public catalog holds product guarantees only.
   const rulesText = readFileSync(join(out, CATALOG), "utf8");
   const ids = [...publicRuleIds(rulesText)];
-  check(ids.length > 20 && ids.every((i) => /^(TENANT|ROUTE|AUTH|CRYPTO|BOOT|BILL|DOMAIN|HTTP|LIFE)-/.test(i)), `public catalog has only product-guarantee rules (${ids.length} of the private catalog)`);
+  check(ids.length >= 12 && ids.every((i) => /^(TENANT|ROUTE|AUTH|BOOT|BILL)-/.test(i)) && !["CRYPTO-1", "BILL-1", "DOMAIN-1", "LIFE-1"].some((i) => ids.includes(i)), `public catalog has only product-guarantee rules that exist today (${ids.length} of the private catalog; unbuilt crypto, billing, domain, HTTP and lifecycle rules do not ship)`);
   check(ids.includes("ROUTE-3") && !/human|agent|review queue/i.test(rulesText) && !/principle/.test(rulesText), "the public catalog has no gap where a private rule was (ROUTE-3 is reworded) and no internal fields");
   const formatsText = readFileSync(join(out, "packages/spec/src/formats.ts"), "utf8");
-  check(!/Decision record|Attestation|validateAttestation|validateDecisionRecord/.test(formatsText) && /validateFinding/.test(formatsText) && /EVENT_TYPES = \["verify\.run", "finding\.recorded"\]/.test(formatsText), "public formats keep findings, events and classification, and drop decision records and attestations");
+  check(!/Decision record|Attestation|validateAttestation|validateDecisionRecord|validateClassification|DATA_CLASSES/.test(formatsText) && /validateFinding/.test(formatsText) && /EVENT_TYPES = \["verify\.run", "finding\.recorded"\]/.test(formatsText), "public formats keep findings and events, and drop classification, decision records and attestations");
   check(!/development plane|attestation|harness|human key|keychain|ledger/i.test(rulesText), "public catalog text has no internal process wording");
   check(throws(() => publicCatalog("no markers here"), /layout changed/), "a restructured catalog aborts the export instead of leaking");
 
@@ -120,7 +121,7 @@ try {
   const seed3 = join(tmp, "seed3"); mkdirSync(seed3); git(["init", "--quiet", "-b", "main"], seed3); writeFileSync(join(seed3, "THEIRS.md"), "someone else's file");
   git(["add", "-A"], seed3); git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "their work"], seed3); git(["push", "--quiet", `file://${bare3}`, "main"], seed3);
   const foreign = (extra = {}) => commitToPublicRepo({ exportDir: fake("e6", "mine"), remote: `file://${bare3}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd3"), identity: person, ...extra });
-  check(throws(() => foreign(), /was not created by this tool.*REPLACED/), "an existing main written by someone else is refused");
+  check(throws(() => foreign(), /holds 1 commit\(s\) this tool did not write.*REPLACES/), "an existing main written by someone else is refused");
   const adopted = foreign({ adopt: true });
   check(adopted.removed.includes("THEIRS.md") && String(git(["ls-tree", "--name-only", "main"], bare3).stdout).trim() === "README.md", "with --adopt-existing it replaces main and reports exactly what it removed");
 
@@ -135,6 +136,59 @@ try {
   const badTar = mk("badpkg", { "package.json": "{}", "src/index.ts": "x", "dist/index.js": "// see docs/decisions/x\n", "dist/decisions.js": "x" });
   const badHits = scanTarball(badTar, tmp).join("\n");
   check(/src\/index\.ts/.test(badHits) && /docs\/decisions/.test(badHits) && /decisions\.js/.test(badHits), "a tarball with source, private text or a private file name is caught");
+  // 8. Git configuration on the releaser's machine cannot reach the public commit: a tool signing key and a trailer-adding hook.
+  const hostile = join(tmp, "hostile"); mkdirSync(join(hostile, "hooks"), { recursive: true });
+  writeFileSync(join(hostile, "hooks/prepare-commit-msg"), '#!/bin/sh\nprintf "\\nCo-Authored-By: Some Tool <noreply@example.com>\\n" >> "$1"\n', { mode: 0o755 });
+  writeFileSync(join(hostile, "gitconfig"), `[user]\n  name = Claude\n  email = noreply@anthropic.com\n  signingkey = /nonexistent/key.pub\n[commit]\n  gpgsign = true\n[tag]\n  gpgsign = true\n[gpg]\n  format = ssh\n  program = /nonexistent/sign\n[core]\n  hooksPath = ${join(hostile, "hooks")}\n`);
+  const savedConfig = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = join(hostile, "gitconfig");
+  try {
+    const bare4 = join(tmp, "hostile.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare4], tmp);
+    const notes = "### Added\n- a thing\n\n### Known limits\n- another";
+    commitToPublicRepo({ exportDir: fake("e7", "seven"), remote: `file://${bare4}`, version: "1.0.0", notes, push: true, workdir: join(tmp, "wd4"), identity: person });
+    const commitObj = String(git(["cat-file", "-p", "main"], bare4).stdout);
+    check(!/gpgsig/.test(commitObj) && !/Co-Authored-By|Claude|anthropic/i.test(commitObj) && /author Release Person <person@example\.org>/.test(commitObj), "a tool signing key, tool identity and trailer-adding hook in the machine's git config do not reach the public commit");
+    const tagObj = String(git(["cat-file", "-p", "refs/tags/v1.0.0"], bare4).stdout);
+    check(!/BEGIN (PGP|SSH) SIGNATURE/.test(tagObj) && /tagger Release Person/.test(tagObj) && tagObj.includes("### Added") && tagObj.includes("### Known limits"), "the tag is unsigned, by the releaser, and keeps the changelog headings");
+    // Planted alteration: an object that carries something else must stop the push.
+    const wd = join(tmp, "wd4");
+    git(["-c", "user.name=Claude", "-c", "user.email=noreply@anthropic.com", "commit", "--quiet", "--amend", "--no-edit", "--allow-empty", "--author", "Claude <noreply@anthropic.com>"], wd, { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_COMMITTER_NAME: "Claude", GIT_COMMITTER_EMAIL: "noreply@anthropic.com" } });
+    check(throws(() => assertCleanObjects(wd, "v1.0.0", person, false, "x"), /not authored by/), "the read-back refuses a commit that carries another identity");
+  } finally { if (savedConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = savedConfig; }
+
+  // 9. The public repo is a mirror: commits written by someone else are listed and refused, with the removals named before anything happens.
+  const bare5 = join(tmp, "mirror.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare5], tmp);
+  commitToPublicRepo({ exportDir: fake("e8", "eight"), remote: `file://${bare5}`, version: "1.0.0", notes: "n", push: true, workdir: join(tmp, "wd5"), identity: person });
+  const contrib = join(tmp, "contrib"); git(["clone", "--quiet", "--branch", "main", `file://${bare5}`, contrib], tmp); writeFileSync(join(contrib, "CONTRIBUTED.md"), "outside work");
+  git(["add", "-A"], contrib); git(["-c", "user.name=Other", "-c", "user.email=o@o", "commit", "--quiet", "-m", "A pull request"], contrib); git(["push", "--quiet", "origin", "main"], contrib);
+  let refusal = ""; try { planPublicRepo({ exportDir: fake("e9", "nine"), remote: `file://${bare5}`, workdir: join(tmp, "plan5") }); } catch (e) { refusal = (e as Error).message; }
+  check(/1 commit\(s\) this tool did not write.*A pull request.*CONTRIBUTED\.md/.test(refusal), "a later outside commit is named, and the files that would be removed are listed in the refusal, before any push");
+  const planned = planPublicRepo({ exportDir: fake("e9", "nine"), remote: `file://${bare5}`, workdir: join(tmp, "plan5"), adopt: true });
+  check(planned.exists && planned.foreign.length === 1 && planned.removed.includes("CONTRIBUTED.md"), "with --adopt-existing the plan reports the same, and still changes nothing");
+
+  // 10. The scan has no blind spots: every file is read, binary files and unusual extensions included, and phase wording is case-insensitive.
+  const blind = join(tmp, "blind"); mkdirSync(join(blind, "packages/core"), { recursive: true });
+  writeFileSync(join(blind, "packages/core/notes.sh"), "# the phase 2 gate\n"); writeFileSync(join(blind, "packages/core/x.mjs"), "// see the decision record\n");
+  writeFileSync(join(blind, "packages/core/blob.bin"), Buffer.from([1, 0, 2])); writeFileSync(join(blind, "packages/core/ok.ts"), "// Phase-3 and the roadmap and a session_01ABCDEFGHIJ id\n");
+  const blindHits = scanForLeaks(blind).join("\n");
+  check(/notes\.sh.*roadmap phase/.test(blindHits) && /x\.mjs.*decision/i.test(blindHits) && /blob\.bin.*binary/.test(blindHits) && /ok\.ts.*(roadmap phase|private gate or roadmap)/.test(blindHits) && /session_01/.test(blindHits), "the scan reads every file type, flags binaries, and matches phase and roadmap wording case-insensitively");
+  // Tarballs get the same rule-citation check as the tree, against the compiled catalog inside the package.
+  const citeTar = mk("citepkg", { "package.json": "{}", "dist/rules.js": '  id: "TENANT-1",\n', "dist/other.js": "// per VERIFY-4\n" });
+  check(/VERIFY-4/.test(scanTarball(citeTar, tmp).join("\n")), "a tarball citing a rule that is not in its own catalog is caught");
+
+  // 11. A fix matching more than once is as wrong as one matching never.
+  FIXES.push({ file: "packages/core/src/api/app.ts", find: "const", replace: "const" });
+  check(throws(() => buildExport({ root, out: join(tmp, "dup"), version: "1.0.0" }), /matched \d+ time\(s\), must be exactly 1/), "a fix that matches more than once aborts the export");
+  FIXES.pop();
+
+  // 12. The command itself refuses before doing any real work.
+  const cli = (...args: string[]) => run(process.execPath, [join(root, "scripts/release.ts"), ...args], { encoding: "utf8", cwd: root, timeout: 60_000 });
+  const bad1 = cli("v1.0");
+  check(bad1.status === 1 && /usage/.test(bad1.stderr), "the command rejects a malformed version");
+  const bad2 = cli("9.9.9", "--dry-run", "--author", "Claude <c@example.com>");
+  check(bad2.status === 1 && /(tool identity|no non-empty|uncommitted)/.test(bad2.stderr), "the command refuses a tool identity, a missing changelog section, or a dirty tree, before exporting");
+  const bad3 = cli("9.9.9", "--dry-run", "--author", "Ada <ada@example.org>");
+  check(bad3.status === 1 && /(no non-empty|uncommitted)/.test(bad3.stderr) && !/Export the public tree/.test(bad3.stdout), "the command stops on a missing changelog section or a dirty tree before exporting anything");
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
