@@ -40,16 +40,20 @@ try {
   writeFileSync(join(refDir, "a.ts"), "// ok TENANT-1\n// private VERIFY-4\n");
   check(scanForLeaks(refDir).length === 1 && /VERIFY-4/.test(scanForLeaks(refDir)[0] as string), "scan catches a citation of a rule that is not in the public catalog");
   const clean = join(tmp, "clean"); mkdirSync(clean);
-  writeFileSync(join(clean, "a.md"), "A package called @kalahroudi/bulkhead-core, fixture DR-9999, https://github.com/kalahroudi/bulkhead-oss\n");
+  writeFileSync(join(clean, "a.md"), "A package called @kalahroudi/bulkhead-core, fixture DR-9999, https://github.com/flamingosh/bulkhead\n");
   check(scanForLeaks(clean).length === 0, "scan passes a clean tree (public scope, fixture ids and the public URL are allowed)");
 
   // 3. Versions, dist-tags, identity, redaction and changelog.
   for (const v of ["0.1.0-preview.1", "1.0.0", "1.0.0-rc.1", "10.20.30"]) check(validVersion(v), `valid version ${v}`);
   for (const v of ["v1.0.0", "1.0", "01.0.0", "1.0.0-a..b", "1.0.0-", "1.0.0-1", "1.0.0-latest.1", "1.0.0-Preview.1", "1.0.0+build", "1.0.0; rm -rf /"]) check(!validVersion(v), `rejected version ${JSON.stringify(v)}`);
   check(npmTag("0.1.0-preview.1") === "preview" && npmTag("1.0.0-rc.2") === "rc" && npmTag("1.0.0") === "latest" && throws(() => npmTag("1.0.0-1"), /cannot be an npm dist-tag/), "npm dist-tag from version, and a numeric or latest label is refused");
-  check(throws(() => resolveIdentity(undefined, (k) => (k === "user.name" ? "Claude" : "noreply@anthropic.com")), /tool identity/), "a tool git identity is refused");
-  check(throws(() => resolveIdentity(undefined, () => ""), /not set/) && throws(() => resolveIdentity("nonsense"), /must look like/) && throws(() => resolveIdentity("Claude <c@example.com>"), /tool identity/), "missing, malformed and tool identities are refused");
-  check(resolveIdentity("Ada Lovelace <ada@example.org>").email === "ada@example.org" && resolveIdentity(undefined, (k) => (k === "user.name" ? "Ada" : "ada@example.org")).name === "Ada", "an explicit or configured human identity is accepted");
+  // The author defaults to the owner's handle and never comes from the machine's git configuration.
+  const toolCfg = join(tmp, "toolidentity.gitconfig"); writeFileSync(toolCfg, "[user]\n  name = Claude\n  email = noreply@anthropic.com\n");
+  const savedCfg = process.env.GIT_CONFIG_GLOBAL; process.env.GIT_CONFIG_GLOBAL = toolCfg;
+  try { const d = resolveIdentity(undefined); check(d.name === "kalahroudi" && d.email === "kalahroudi@users.noreply.github.com", "the default author is kalahroudi, whatever the machine's git configuration says"); }
+  finally { if (savedCfg === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = savedCfg; }
+  check(throws(() => resolveIdentity("Claude <c@example.com>"), /tool identity/) && throws(() => resolveIdentity("nonsense"), /must look like/) && throws(() => resolveIdentity("Ann <x> Lee <ann@example.org>"), /must look like/), "a tool identity or a malformed --author is refused");
+  check(resolveIdentity("Ada Lovelace <ada@example.org>").email === "ada@example.org", "an explicit human --author is accepted");
   check(!redact("https://user:ghp_secret@github.com/x/y.git").includes("ghp_secret") && redact("https://github.com/x/y.git") === "https://github.com/x/y.git", "credentials in a remote URL are redacted");
   const log = "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - x\n\n### Added\n- thing\n\n## [0.1.0-preview.0] - y\nold\n";
   check(changelogSection(log, "0.2.0")?.includes("- thing") === true && changelogSection(log, "9.9.9") === null && changelogSection(log, "0.1.0") === null && changelogSection(log, "0.1.0-preview.0") === "old", "changelog section lookup");
@@ -62,9 +66,9 @@ try {
   check(["README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "site/index.html", ".github/workflows/ci.yml", ".github/workflows/pages.yml", "packages/core/src/api/app.ts", "examples/demo-app/src/routes.ts", "pnpm-lock.yaml"].every((f) => files.includes(f)), "export has the public files (README, CHANGELOG, site, workflows, packages, demo, lockfile)");
   check(!files.some((f) => /^(SPEC\.md|CLAUDE\.md|AGENTS\.md|FROZEN_PATHS|CODEOWNERS)$|^docs\/|^release\/|^scripts\/(release|verify-mutations|mutation)|mutations\.ts$/.test(f)), "export has no private docs, records, specs, release tooling or mutation catalog");
   const coreManifest = JSON.parse(readFileSync(join(out, "packages/core/package.json"), "utf8"));
-  check(coreManifest.version === "9.8.7-preview.3" && coreManifest.repository.url === "git+https://github.com/kalahroudi/bulkhead-oss.git" && coreManifest.bugs.url === "https://github.com/kalahroudi/bulkhead-oss/issues" && !JSON.stringify(coreManifest).includes("bulkhead-oss-oss"), "export sets the release version and the public URLs");
+  check(coreManifest.version === "9.8.7-preview.3" && coreManifest.repository.url === "git+https://github.com/flamingosh/bulkhead.git" && coreManifest.bugs.url === "https://github.com/flamingosh/bulkhead/issues" && !JSON.stringify(coreManifest).includes("kalahroudi/bulkhead\""), "export sets the release version and the public URLs");
   const siteHtml = readFileSync(join(out, "site/index.html"), "utf8");
-  check(siteHtml.includes('href="https://github.com/kalahroudi/bulkhead-oss"') && !siteHtml.includes("@@") && !/bulkhead-oss-oss/.test(siteHtml) && !/github\.com\/kalahroudi\/bulkhead(?![-\w])/.test(siteHtml), "the site links follow the public repository constant, with no leftover tokens, no doubled suffix and no private URL");
+  check(siteHtml.includes('href="https://github.com/flamingosh/bulkhead"') && !siteHtml.includes("@@") && !/github\.com\/kalahroudi\/bulkhead(?![-\w])/.test(siteHtml), "the site links follow the public repository constant, with no leftover tokens, no doubled suffix and no private URL");
   const otherOut = join(tmp, "other-slug"); buildExport({ root, out: otherOut, version: "1.0.0", slug: "someone/else" });
   check(JSON.parse(readFileSync(join(otherOut, "packages/core/package.json"), "utf8")).repository.url === "git+https://github.com/someone/else.git" && readFileSync(join(otherOut, "site/index.html"), "utf8").includes("https://github.com/someone/else"), "--repo changes the package metadata and the site links together");
   const rootManifest = JSON.parse(readFileSync(join(out, "package.json"), "utf8"));
@@ -201,8 +205,8 @@ try {
   const bad3 = cli("9.9.9", "--dry-run", "--author", "Ada <ada@example.org>");
   check(bad3.status === 1 && /(no non-empty|uncommitted)/.test(bad3.stderr) && !/Export the public tree/.test(bad3.stdout), "the command stops on a missing changelog section or a dirty tree before exporting anything");
   // 13. Round-3 hardening, each with a test that can fail.
-  check(["https://github.com/kalahroudi/bulkhead.git", "https://github.com/Kalahroudi/bulkhead", "git@github.com:kalahroudi/bulkhead.git", "ssh://git@github.com/kalahroudi/bulkhead.git/", "https://user:tok@github.com/kalahroudi/bulkhead.git", "git+https://github.com/kalahroudi/bulkhead.git"].every((r) => throws(() => refuseIfPrivateRemote(r), /private repository/)) && !throws(() => refuseIfPrivateRemote("https://github.com/kalahroudi/bulkhead-oss.git"), /./) && !throws(() => refuseIfPrivateRemote(`file://${bare}`), /./), "the private repository is refused as a target in every spelling, and the public one is not");
-  check(throws(() => resolveIdentity("Ann <x> Lee <ann@example.org>"), /must look like/) && throws(() => resolveIdentity("Copilot <c@example.org>"), /tool identity/), "an author name git would mangle, or another tool's identity, is refused");
+  check(["https://github.com/kalahroudi/bulkhead.git", "https://github.com/Kalahroudi/bulkhead", "git@github.com:kalahroudi/bulkhead.git", "ssh://git@github.com/kalahroudi/bulkhead.git/", "https://user:tok@github.com/kalahroudi/bulkhead.git", "git+https://github.com/kalahroudi/bulkhead.git"].every((r) => throws(() => refuseIfPrivateRemote(r), /private repository/)) && !throws(() => refuseIfPrivateRemote("https://github.com/flamingosh/bulkhead.git"), /./) && !throws(() => refuseIfPrivateRemote(`file://${bare}`), /./), "the private repository is refused as a target in every spelling, and the public one is not");
+  check(throws(() => resolveIdentity("Copilot <c@example.org>"), /tool identity/), "another tool's identity is refused too");
 
   // Verbatim message: trailing spaces, double blank lines and '#' headings survive, and the read-back does not misfire on them.
   const bare6 = join(tmp, "verbatim.git"); git(["init", "--quiet", "--bare", "-b", "trunk", bare6], tmp);

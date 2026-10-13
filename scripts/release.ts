@@ -1,7 +1,7 @@
 // Publishes a release: exports a clean public copy of the repo, checks it, pushes it to the public GitHub repo (creating `main`
 // when the remote has none), tags it, and publishes the four packages to npm. You run it by hand.
 //
-//   node scripts/release.ts <version> [--dry-run] [--yes] [--author "Name <you@example.com>"]
+//   node scripts/release.ts <version> [--dry-run] [--yes] [--author "Name <email>"]  (default author: kalahroudi)
 //                           [--repo owner/name] [--remote=<git url>] [--out=<dir>] [--skip-git] [--skip-npm] [--adopt-existing] [--sign]
 //
 // Needs: git 2.32+, git push access to the public repo, `npm login` as a member of the @kalahroudi scope (npm prompts for your

@@ -5,12 +5,12 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
-/** The public repository, owner/name. The private repository is kalahroudi/bulkhead, so the public one needs a different name. */
-export const PUBLIC_SLUG = "kalahroudi/bulkhead-oss";
+/** The public repository, owner/name (the private one is kalahroudi/bulkhead). */
+export const PUBLIC_SLUG = "flamingosh/bulkhead";
 export const publicUrlOf = (slug: string) => `https://github.com/${slug}`;
 export const PUBLIC_URL = publicUrlOf(PUBLIC_SLUG);
 export const PUBLIC_REPO = `${PUBLIC_URL}.git`;
-/** The private repository's URL, matched only as a whole: the public URL may start with the same text (`.../bulkhead-oss`). */
+/** The private repository's URL, matched only as a whole (a longer name such as `bulkhead-core` is not it). */
 const PRIVATE_URL_RE = /https:\/\/github\.com\/kalahroudi\/bulkhead(?![-\w])/g;
 /** Publish order matters: each package depends on the ones before it. */
 export const PACKAGES = [
@@ -321,18 +321,13 @@ export function npmTag(v: string): string {
 // --- Git identity: the public history must carry the releaser's own name, never a tool's. ---
 export interface Identity { name: string; email: string }
 const AGENT_IDENTITY = /claude|anthropic|copilot|cursor|codex|gemini|openai|chatgpt/i;
-export function resolveIdentity(author: string | undefined, read: (key: string) => string = (k) => String(git(["config", "--get", k], process.cwd()).stdout).trim()): Identity {
-  let name: string, email: string;
-  if (author) {
-    const m = /^\s*([^<>]+?)\s*<([^<>\s]+@[^<>\s]+)>\s*$/.exec(author);
-    if (!m) throw new Error('--author must look like "Your Name <you@example.com>" (the name cannot contain < or >, which git strips)');
-    [name, email] = [m[1] as string, m[2] as string];
-  } else {
-    [name, email] = [read("user.name"), read("user.email")];
-    if (!name || !email) throw new Error("git user.name and user.email are not set; set them or pass --author \"Your Name <you@example.com>\"");
-    if (/[<>]/.test(name)) throw new Error("git user.name contains < or >, which git strips; pass --author instead");
-  }
-  if (AGENT_IDENTITY.test(name) || AGENT_IDENTITY.test(email)) throw new Error(`the git identity "${name} <${email}>" is a tool identity; pass --author "Your Name <you@example.com>" so the public history carries yours`);
+/** The author of the public history unless --author says otherwise: the owner's GitHub handle with its no-reply address, so no personal address is published. The machine's own git configuration is never read. */
+export const DEFAULT_AUTHOR = "kalahroudi <kalahroudi@users.noreply.github.com>";
+export function resolveIdentity(author: string | undefined): Identity {
+  const m = /^\s*([^<>]+?)\s*<([^<>\s]+@[^<>\s]+)>\s*$/.exec(author ?? DEFAULT_AUTHOR);
+  if (!m) throw new Error('--author must look like "Your Name <you@example.com>" (the name cannot contain < or >, which git strips)');
+  const [name, email] = [m[1] as string, m[2] as string];
+  if (AGENT_IDENTITY.test(name) || AGENT_IDENTITY.test(email)) throw new Error(`the identity "${name} <${email}>" is a tool identity; the public history must carry yours (default: ${DEFAULT_AUTHOR})`);
   return { name, email };
 }
 
