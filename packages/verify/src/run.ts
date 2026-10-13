@@ -40,7 +40,9 @@ export interface Fixture {
 }
 
 export function startFixture(bugs: string[]): Promise<Fixture> {
-  const server = fileURLToPath(new URL("../fixture/server.ts", import.meta.url));
+  // Source runs as .ts under type stripping; the published package runs the compiled .js beside it.
+  const ext = import.meta.url.endsWith(".ts") ? "ts" : "js";
+  const server = fileURLToPath(new URL(`../fixture/server.${ext}`, import.meta.url));
   const child = spawn(process.execPath, [server], {
     env: { ...process.env, FIXTURE_BUGS: bugs.length ? bugs.join(",") : "none", FIXTURE_WEBHOOK_SECRET: WEBHOOK_SECRET, FIXTURE_BOOTSTRAP_TOKEN, PORT: "0" },
     stdio: ["ignore", "pipe", "inherit"],

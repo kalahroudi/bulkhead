@@ -21,9 +21,10 @@ function unresolved(ref: string): string | null {
       const [path, title] = rest.split("::");
       if (!path || path.includes("..") || !existsSync(repo + path) || !statSync(repo + path).isFile()) return "test file does not exist";
       if (!title?.trim()) return "a test ref must name a test title after '::'";
-      // The title must appear in a test declaration, not in a comment or an unrelated string.
-      const declared = readFileSync(repo + path, "utf8").split("\n").some((l) => /^\s*test\(\s*["'`]/.test(l) && l.includes(title));
-      return declared ? null : `no test(...) declaration in ${path} contains "${title}"`;
+      // The title must sit on a real assertion: a `test("...")` declaration, or a `check(..., "...")` line in a self-test script.
+      // A comment or an unrelated string does not count.
+      const declared = readFileSync(repo + path, "utf8").split("\n").some((l) => (/^\s*test\(\s*["'`]/.test(l) || (/\bcheck\(/.test(l) && !/^\s*\/\//.test(l))) && l.includes(title));
+      return declared ? null : `no test(...) declaration or check(...) assertion in ${path} contains "${title}"`;
     }
     default: return "unknown ref kind";
   }
@@ -43,7 +44,7 @@ test("every ref a decision record cites resolves to a real probe, catalog entry,
 });
 
 test("the resolver itself rejects bad refs", () => {
-  for (const bad of ["probe:nope", "mutation:nope", "gate:phase99", "script:scripts/nope.ts", "test:packages/auth/test/auth.test.ts::no such title", "test:packages/nope.test.ts", "test:packages/auth/test/auth.test.ts", "test:packages/auth/test/auth.test.ts::", "script:scripts", "script:../etc/passwd", "vibes:x"])
+  for (const bad of ["probe:nope", "mutation:nope", "gate:phase99", "script:scripts/nope.ts", "test:packages/auth/test/auth.test.ts::no such title", "test:scripts/release-selftest.ts::no such assertion", "test:packages/nope.test.ts", "test:packages/auth/test/auth.test.ts", "test:packages/auth/test/auth.test.ts::", "script:scripts", "script:../etc/passwd", "vibes:x"])
     assert.notEqual(unresolved(bad), null, bad);
   for (const good of ["probe:csrf-origin", "mutation:csrf-origin-ignored", "gate:phase4", "script:scripts/verify-mutations.ts", "test:packages/auth/test/auth.test.ts::bootstrap"])
     assert.equal(unresolved(good), null, good);

@@ -15,7 +15,8 @@
     "gate:phase1": "pnpm gate:phase0 && pnpm --filter @kalahroudi/bulkhead-verify selfcheck",
     "gate:phase2": "pnpm gate:phase1 && pnpm --filter bulkhead-demo-app manifest:check && node scripts/verify-kernel.ts",
     "gate:phase3": "pnpm gate:phase2 && node scripts/verify-kernel.ts --rules TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4",
-    "gate:phase4": "pnpm gate:phase3 && node scripts/mutation-selfcheck.ts && node scripts/verify-mutations.ts"
+    "gate:phase4": "pnpm gate:phase3 && node scripts/mutation-selfcheck.ts && node scripts/verify-mutations.ts",
+    "gate:release": "pnpm gate:phase4 && node scripts/consumer-test.ts && node scripts/release-selftest.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

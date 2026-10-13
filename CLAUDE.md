@@ -22,7 +22,7 @@ Bulkhead turns a Cloudflare Workers project into a multi-tenant service, with se
 
 ## Current state
 
-Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has started: DR-0007 and DR-0008 are accepted; DR-0009 (accepted) records the automated mutation checks built under them (catalog in `packages/verify/src/mutations.ts`, runner in `scripts/`, decision lint in `packages/spec/`). Crypto work (CRYPTO-*) is not started and needs its own scoping record first.
+Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has started: DR-0007 and DR-0008 are accepted; DR-0009 (accepted) records the automated mutation checks built under them (catalog in `packages/verify/src/mutations.ts`, runner in `scripts/`, decision lint in `packages/spec/`). Crypto (CRYPTO-*) is scoped in DR-0010 (proposed) and not started. DR-0011 (proposed) scopes a time-boxed Better Auth evaluation. The packages are prepared as a public `0.1.0-preview` (DR-0013, proposed): not security-attested, no encryption at rest, no billing or provisioning.
 
 ## Commands
 
@@ -31,6 +31,8 @@ Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005
 - `pnpm gate:phase2`: phase 1 gate, route manifest check, and a black-box verify of the tenancy rules (TENANT-1/4/5) against the demo Worker running in local workerd.
 - `pnpm gate:phase3`: phase 2 gate plus a black-box verify of the auth rules (AUTH-1..4, alongside TENANT-1/4/5) against the demo Worker.
 - `pnpm gate:phase4`: phase 3 gate, then `scripts/mutation-selfcheck.ts` (proves the runner fails on survivors, mis-attribution and stale entries), then `scripts/verify-mutations.ts` (mutates a scratch copy; exactly the named probes must fail; a baseline that already fails is an error).
+- `pnpm gate:release`: phase 4 gate, then `scripts/consumer-test.ts`: packs `core`, `auth`, `spec`, `verify`, checks the tarballs, installs them into a clean project, typechecks and boots the README quickstart in workerd, and runs the installed verifier's self-check. Publishing is the owner's action: `node scripts/release.ts <version>` (`--dry-run` first); see DR-0014.
+- `node scripts/release.ts <version> [--dry-run]`: exports a clean public copy of the repo (allowlist, exact text fixes, product-guarantee rules only), scans it and the tarballs for private material, runs the public gate on the exact tarballs, pushes to the public repo (creating `main` if missing, one atomic push of branch and tag), then publishes to npm. `scripts/release-selftest.ts` (part of `gate:release`) proves the scan, the export and the git flow can fail.
 - `pnpm spec:lint` (part of every gate) also lints decision records: each numbered choice must cite `Check:` refs or say `No check:` and why; `packages/verify/test/decisions.test.ts` resolves every ref.
 - `node packages/plane/src/cli.ts [--once] [--log-dir .bulkhead]`: terminal view of the event log.
 - `pnpm --filter @kalahroudi/bulkhead-spec catalog`: regenerate `SPEC.md`.
