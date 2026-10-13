@@ -17,6 +17,5 @@
   },
   "devDependencies": {
     "@kalahroudi/bulkhead-verify": "workspace:*"
-  },
-  "private": true
+  }
 }

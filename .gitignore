@@ -5,4 +5,3 @@ dist
 *.log
 .bulkhead/
 .commandcode/
-tsconfig.build.json
