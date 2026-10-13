@@ -2,7 +2,7 @@
 
 Multi-tenant security for Cloudflare Workers, enforced by structure and checked by an independent verifier.
 
-> **Preview (`0.1.0-preview`).** Not security-attested, no encryption-at-rest yet, no billing, no tenant provisioning (the first owner is claimed with a bootstrap token). Every rule in [`SPEC.md`](SPEC.md) is still `proposed`. A green verify report means *no known leak paths*, not proof that none exist. Read [`SECURITY.md`](SECURITY.md) before relying on it.
+> **Preview (`0.1.0-preview`).** Not security-attested, no encryption-at-rest yet, no billing, no tenant provisioning (the first owner is claimed with a bootstrap token). Every rule in the `@kalahroudi/bulkhead-spec` catalog is still `proposed`. A green verify report means *no known leak paths*, not proof that none exist. Read [`SECURITY.md`](SECURITY.md) before relying on it.
 
 ## What you get
 
@@ -101,6 +101,6 @@ A packaged probe-route helper is planned, not built. `run` refuses non-loopback 
 
 ## Status and limits
 
-See [`CLAUDE.md`](CLAUDE.md) for how the project is built (spec first, frozen paths, decision records in [`docs/decisions`](docs/decisions)) and [`SECURITY.md`](SECURITY.md) for reporting. Requires Node 22+ for the tooling and a Cloudflare Workers runtime with Durable Objects (SQLite) for the app.
+See [`CHANGELOG.md`](CHANGELOG.md) for what each release contains and [`SECURITY.md`](SECURITY.md) for reporting a vulnerability. Requires Node 22+ for the tooling and a Cloudflare Workers runtime with Durable Objects (SQLite) for the app.
 
 Licensed under Apache-2.0.
