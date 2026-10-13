@@ -5,7 +5,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 const ALL = [
   "missing-tenant-filter", "shared-cache-key", "skipped-signature-check", "tenant-from-header",
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
-  "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored",
+  "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -20,7 +20,7 @@ const POLICY: Record<string, { role: Role; permission?: string }> = {
   "/private/admin": { role: "admin", permission: "private:admin" },
   "/private/owner": { role: "owner" },
 };
-const users = new Map<string, { id: string; email: string; password: string; role: Role }>(); // key: tenant|email
+const users = new Map<string, { id: string; email: string; password: string; role: Role; disabled: boolean }>(); // key: tenant|email
 const sessions = new Map<string, { tenant: string; userId: string; role: Role }>();
 const keys = new Map<string, { tenant: string; secret: string; role: Role; permissions: string[]; createdBy: string; revoked: boolean }>();
 const tenantUsers = (tenant: string) => [...users.values()].filter((u) => users.get(`${tenant}|${u.email}`) === u);
@@ -89,14 +89,14 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const b = json();
     if (b.token !== BOOTSTRAP) return reply(403, { error: "forbidden" });
     if (tenantUsers(tenant).length) return reply(409, { error: "tenant already has users" });
-    const u = { id: token(8), email: String(b.email), password: String(b.password), role: "owner" as Role };
+    const u = { id: token(8), email: String(b.email), password: String(b.password), role: "owner" as Role, disabled: false };
     users.set(`${tenant}|${u.email}`, u);
     return reply(201, { id: u.id, role: "owner" });
   }
   if (method === "POST" && path === "/auth/login") {
     const b = json();
     const u = users.get(`${tenant}|${b.email}`);
-    if (!u || u.password !== b.password) return reply(401, { error: "invalid credentials" });
+    if (!u || u.password !== b.password || (u.disabled && !bugs.has("disabled-user-can-login"))) return reply(401, { error: "invalid credentials" });
     const presented = cookieOf(String(headers.cookie ?? ""));
     if (presented && !bugs.has("session-fixation")) sessions.delete(presented);
     const t = bugs.has("session-fixation") && presented ? presented : `bks_${token(32)}`;
@@ -123,7 +123,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const b = json();
     const wanted = b.role as Role;
     if (!bugs.has("escalation-allowed") && RANK[wanted] > RANK[p.role]) return reply(403, { error: "cannot grant a role above your own" });
-    const u = { id: token(8), email: String(b.email), password: String(b.password), role: wanted };
+    const u = { id: token(8), email: String(b.email), password: String(b.password), role: wanted, disabled: false };
     users.set(`${tenant}|${u.email}`, u);
     return reply(201, { id: u.id, role: u.role });
   }
@@ -138,6 +138,19 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     if (!bugs.has("role-change-keeps-session")) for (const [k, s] of sessions) if (s.userId === u.id) sessions.delete(k);
     if (!bugs.has("key-revocation-ignored")) for (const [, k] of keys) if (k.createdBy === u.id) k.revoked = true;
     return reply(200, { id: u.id, role: u.role });
+  }
+  const userPath = /^\/users\/([^/]+)$/.exec(path);
+  if (method === "DELETE" && userPath) {
+    const p = principal(tenant, headers);
+    if (!p) return reply(401, { error: "authentication required" });
+    if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    const u = tenantUsers(tenant).find((x) => x.id === userPath[1]);
+    if (!u) return reply(404, { error: "not found" });
+    if (RANK[u.role] > RANK[p.role]) return reply(403, { error: "cannot modify a user above your own role" });
+    u.disabled = true;
+    for (const [k, s] of sessions) if (s.userId === u.id) sessions.delete(k);
+    for (const [, k] of keys) if (k.createdBy === u.id) k.revoked = true;
+    return reply(200, { id: u.id, disabled: true });
   }
   if (method === "POST" && path === "/api-keys") {
     const p = principal(tenant, headers);

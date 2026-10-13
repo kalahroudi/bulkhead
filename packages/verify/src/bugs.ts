@@ -11,7 +11,7 @@ export const seededBugs: SeededBug[] = [
   { id: "shared-cache-key", description: "Summary cache key omits the tenant", probeIds: ["cache-canary"] },
   { id: "skipped-signature-check", description: "Billing webhook accepted without a valid signature", probeIds: ["forged-signature"] },
   { id: "tenant-from-header", description: "Tenant taken from a client-supplied x-tenant header", probeIds: ["identity-header-differential"] },
-  { id: "default-role", description: "A request with no credential is treated as a member", probeIds: ["logout-revokes", "no-default-role", "role-change-revokes", "session-rotation", "cross-tenant-session"] },
+  { id: "default-role", description: "A request with no credential is treated as a member", probeIds: ["logout-revokes", "no-default-role", "role-change-revokes", "session-rotation", "cross-tenant-session", "disabled-user-denied"] },
   { id: "session-fixation", description: "Login adopts the session token the client presented", probeIds: ["session-rotation"] },
   { id: "weak-cookie", description: "Session cookie lacks HttpOnly and is scoped to the parent domain", probeIds: ["cookie-flags"] },
   { id: "logout-keeps-session", description: "Logout does not revoke the session", probeIds: ["logout-revokes"] },
@@ -24,4 +24,5 @@ export const seededBugs: SeededBug[] = [
   { id: "member-can-list-users", description: "The user and API-key listings require only the member role", probeIds: ["authority-matrix"] },
   { id: "escalation-allowed", description: "An admin can create a user with a role above their own", probeIds: ["authority-matrix"] },
   { id: "key-revocation-ignored", description: "A revoked API key, or one whose minter was demoted, keeps working", probeIds: ["key-revocation"] },
+  { id: "disabled-user-can-login", description: "A disabled user can still log in with the right password", probeIds: ["disabled-user-denied"] },
 ];

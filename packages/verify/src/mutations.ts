@@ -89,8 +89,7 @@ export const mutations: Mutation[] = [
     id: "login-ignores-disabled", rule: "AUTH-2", file: ROUTES,
     find: "if (!user || !ok || user.disabled !== 0) {",
     replace: "if (!user || !ok) {",
-    expect: [],
-    gap: "no black-box probe disables a user and then retries; covered by auth unit tests only (DR-0006 known limits)",
+    expect: ["disabled-user-denied"],
   },
   {
     id: "login-no-rotation", rule: "AUTH-2", file: ROUTES,
@@ -168,5 +167,62 @@ export const mutations: Mutation[] = [
     find: "if (!row || !isRole(row.role)) return null;",
     replace: 'if (!row || !isRole(row.role)) return { id: "anonymous", role: "member" };',
     expect: ["cross-tenant-session", "logout-revokes", "no-default-role", "role-change-revokes", "session-rotation"],
+  },
+  {
+    id: "key-revoked-check-removed", rule: "AUTH-4", file: AUTH,
+    find: "where k.id = ? and k.revoked_at is null and (k.expires_at is null or k.expires_at > ?)",
+    replace: "where k.id = ? and (k.expires_at is null or k.expires_at > ?)",
+    expect: ["key-revocation"],
+  },
+  // Lines found unprotected by the attacker pass (DR-0009): no black-box probe reaches them yet, so each is a named gap
+  // that the auth unit tests must kill. The probes that would close them are listed as owed in DR-0009.
+  {
+    id: "key-secret-not-compared", rule: "AUTH-4", file: AUTH,
+    find: "if (!row || !ok || row.user_disabled",
+    replace: "if (!row || row.user_disabled",
+    expect: [],
+    gap: "no probe presents a real key id with a wrong secret (no-default-role uses an unknown id); covered by auth unit tests only",
+  },
+  {
+    id: "bootstrap-token-unchecked", rule: "AUTH-1", file: ROUTES,
+    find: "|| !safeEqual(b.token, secret)) return c.json({ error: \"forbidden\" }, 403);",
+    replace: ") return c.json({ error: \"forbidden\" }, 403);",
+    expect: [],
+    gap: "no probe sends a wrong or missing bootstrap token; covered by auth unit tests only",
+  },
+  {
+    id: "bootstrap-allows-second-owner", rule: "AUTH-1", file: ROUTES,
+    find: ", ? where not exists (select 1 from users)\"",
+    replace: ", ? \"",
+    expect: [],
+    gap: "probes bootstrap each tenant exactly once, never a second claim; covered by auth unit tests only",
+  },
+  {
+    id: "role-patch-above-own-role", rule: "AUTH-3", file: ROUTES,
+    find: "    if (rank(b.role) > rank(c.user!.role)) return c.json({ error: \"cannot grant a role above your own\" }, 403);\n    const refused = await guardTarget(c, id, b.role !== \"owner\");",
+    replace: "    const refused = await guardTarget(c, id, b.role !== \"owner\");",
+    expect: [],
+    gap: "authority-matrix exercises POST /users but not PATCH /users/:id/role; covered by auth unit tests only",
+  },
+  {
+    id: "guard-target-above-own-role", rule: "AUTH-3", file: ROUTES,
+    find: "if (rank(target.role) > rank(c.user!.role)) return c.json({ error: \"cannot modify a user above your own role\" }, 403);",
+    replace: "",
+    expect: [],
+    gap: "no probe has an admin modify or disable an owner; covered by auth unit tests only",
+  },
+  {
+    id: "key-minted-above-own-role", rule: "AUTH-4", file: ROUTES,
+    find: "if (rank(role) > rank(c.user!.role)) return c.json({ error: \"cannot mint a key above your own role\" }, 403);",
+    replace: "",
+    expect: [],
+    gap: "api-key-scope mints as owner, so the role ceiling is never tested black-box; covered by auth unit tests only",
+  },
+  {
+    id: "user-list-leaks-password-hash", rule: "AUTH-4", file: ROUTES,
+    find: "select id, email, role, disabled, created_at from users order by created_at, id",
+    replace: "select id, email, role, disabled, created_at, password_hash from users order by created_at, id",
+    expect: [],
+    gap: "no probe scans listings for hash material; covered by auth unit tests only",
   },
 ];

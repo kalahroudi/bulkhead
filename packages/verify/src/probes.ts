@@ -81,6 +81,8 @@ export const probes: Probe[] = [
       const broken = requireSetup(planted, "planting the marker as tenant A", reproduction);
       if (broken) return broken;
       const r = await req(host("canary-b"), "GET", "/notes");
+      const brokenRead = requireSetup(r, "reading tenant B's notes (a 4xx or 5xx would read as 'marker absent')", reproduction);
+      if (brokenRead) return brokenRead;
       return { ...canaryOracle(m, [{ where: "GET /notes as tenant B", response: r }]), reproduction };
     },
   },
@@ -99,6 +101,8 @@ export const probes: Probe[] = [
       const brokenWarm = requireSetup(warmed, "warming the cache as tenant A", reproduction);
       if (brokenWarm) return brokenWarm;
       const r = await req(host("cache-b"), "GET", "/summary");
+      const brokenRead = requireSetup(r, "reading tenant B's summary (a 4xx or 5xx would read as 'marker absent')", reproduction);
+      if (brokenRead) return brokenRead;
       return { ...canaryOracle(m, [{ where: "GET /summary as tenant B after tenant A warmed it", response: r }]), reproduction };
     },
   },
@@ -486,6 +490,38 @@ export const probes: Probe[] = [
           { name: "second key works before the minter is demoted", ok: secondWorks.status === 200, detail: `HTTP ${secondWorks.status}` },
           { name: "demoting the minter is accepted", ok: demoted.status === 200, detail: `HTTP ${demoted.status} ${demoted.body}` },
           { name: "key of a demoted minter is refused", ok: secondDead.status === 401, detail: `HTTP ${secondDead.status}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "disabled-user-denied",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "Create a member and log them in. Have the owner DELETE /users/:id. The member's old cookie must be 401, and a fresh POST /auth/login with the right password must be the same 401 as a wrong password.";
+      const t = await ownerTenant(ctx, "disabled", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token, addUser, loginAs } = t as Extract<typeof t, { h: string }>;
+      const added = await addUser("gone@probe.test", "member");
+      if ("error" in added) return added.error!;
+      const m = await loginAs("gone@probe.test");
+      if ("error" in m) return m.error!;
+      const before = await req(h, "GET", "/private/member", withCookie(m.token));
+      const disabled = await req(h, "DELETE", `/users/${added.id}`, cookieWrite(h, token));
+      const oldSession = await req(h, "GET", "/private/member", withCookie(m.token));
+      const relogin = await req(h, "POST", "/auth/login", { body: json({ email: "gone@probe.test", password: PASSWORD }) });
+      const wrong = await req(h, "POST", "/auth/login", { body: json({ email: "gone@probe.test", password: `${PASSWORD}-wrong` }) });
+      return {
+        ...specOracle([
+          { name: "member session worked before disabling", ok: before.status === 200, detail: `HTTP ${before.status}` },
+          { name: "disabling the member is accepted", ok: disabled.status === 200, detail: `HTTP ${disabled.status} ${disabled.body}` },
+          { name: "old session is dead after disabling", ok: oldSession.status === 401, detail: `HTTP ${oldSession.status}` },
+          { name: "wrong password is refused with 401 (baseline)", ok: wrong.status === 401, detail: `HTTP ${wrong.status} ${wrong.body}` },
+          { name: "disabled user's correct password is refused with the same 401 and body as a wrong password", ok: relogin.status === 401 && relogin.status === wrong.status && relogin.body === wrong.body && !sessionOf(relogin), detail: `HTTP ${relogin.status} ${relogin.body} vs wrong password HTTP ${wrong.status} ${wrong.body}` },
         ]),
         reproduction,
       };
