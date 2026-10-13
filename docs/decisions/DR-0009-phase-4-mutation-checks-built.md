@@ -1,6 +1,6 @@
 # DR-0009: Phase 4 item 1 built: automated mutation checks, catalog in verify, decision lint
 
-- Status: proposed (owner acceptance and signature pending; the builder cannot accept its own record)
+- Status: accepted (owner approved in session on 2026-10-13; cryptographic signature pending)
 - Date: 2026-10-13
 - Rules: VERIFY-4 (and, through it, every rule with a probe)
 

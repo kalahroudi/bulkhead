@@ -22,7 +22,7 @@ Bulkhead turns a Cloudflare Workers project into a multi-tenant service, with se
 
 ## Current state
 
-Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has started: DR-0007 and DR-0008 are accepted; DR-0009 (proposed) records the automated mutation checks built under them (catalog in `packages/verify/src/mutations.ts`, runner in `scripts/`, decision lint in `packages/spec/`). Crypto work (CRYPTO-*) is not started and needs its own scoping record first.
+Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has started: DR-0007 and DR-0008 are accepted; DR-0009 (accepted) records the automated mutation checks built under them (catalog in `packages/verify/src/mutations.ts`, runner in `scripts/`, decision lint in `packages/spec/`). Crypto work (CRYPTO-*) is not started and needs its own scoping record first.
 
 ## Commands
 
