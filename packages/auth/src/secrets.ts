@@ -21,7 +21,7 @@ export function safeEqual(a: string, b: string): boolean {
 
 // Workers' WebCrypto caps PBKDF2 at 100,000 iterations, so that is the ceiling. Parameters are stored with
 // each hash so they can be raised later without invalidating existing passwords.
-const PBKDF2_ITERATIONS = 100_000;
+export const PBKDF2_ITERATIONS = 100_000;
 
 async function derive(password: string, salt: Uint8Array<ArrayBuffer>, iterations: number): Promise<string> {
   const key = await crypto.subtle.importKey("raw", enc.encode(password.normalize("NFKC")), "PBKDF2", false, ["deriveBits"]);
