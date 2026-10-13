@@ -16,7 +16,7 @@ writeFileSync(catalog, `export const mutations = [
   { id: "canary-misattributed", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "return new URL(origin).host === new URL(req.url).host;", replace: "return true;", expect: ["cookie-flags"] },
   // Gap survivor: a gap entry whose mutation breaks neither a probe nor a unit test must fail the gate.
   { id: "canary-gap-survivor", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "// Compare against a hash even when the key is unknown so lookups take the same path.", replace: "// edited for the gap canary", expect: [], gap: "canary: nothing protects a comment" },
-  // Stale second edit: an `also` edit that matches nothing must error too, not be skipped.
+  // Stale second edit: an extra edit (also) that matches nothing must error too, not be skipped.
   { id: "canary-also-stale", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "return new URL(origin).host === new URL(req.url).host;", replace: "return true;", also: [{ file: ${JSON.stringify(AUTH)}, find: "this text is not in the file either", replace: "x" }], expect: ["csrf-origin"] },
   // Stale entry: the line it targets does not exist, which must error instead of being skipped.
   { id: "canary-stale", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "this text is not in the file", replace: "x", expect: ["csrf-origin"] },
