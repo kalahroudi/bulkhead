@@ -245,3 +245,25 @@ test("defence in depth: a disabled user's existing session and keys fail even if
   assert.equal((await call("t1", "GET", "/m", { cookie: m })).status, 401);
   assert.equal((await call("t1", "GET", "/m", { bearer: key })).status, 401);
 });
+
+test("listings expose metadata only: no password hash and no key secret hash, by value or by column name", async () => {
+  const { call, owner, mkUser, env } = setup();
+  const o = await owner("t1");
+  await mkUser("t1", o, "m@x.io", "member");
+  const key = (await call("t1", "POST", "/api-keys", { cookie: o, body: { name: "k", permissions: ["m:read"] } })).json;
+  const users = await call("t1", "GET", "/users", { cookie: o });
+  const keys = await call("t1", "GET", "/api-keys", { cookie: o });
+  assert.equal(users.status, 200);
+  assert.equal(keys.status, 200);
+  const secrets: string[] = [];
+  for (const d of env.BULKHEAD_TENANT.databases.values()) {
+    for (const r of d.prepare("select password_hash as h from users").all() as { h: string }[]) secrets.push(r.h);
+    for (const r of d.prepare("select secret_hash as h from api_keys").all() as { h: string }[]) secrets.push(r.h);
+  }
+  assert.ok(secrets.length >= 3, "expected the fake database to hold two password hashes and one key hash");
+  for (const text of [users.text, keys.text]) {
+    for (const s of secrets) assert.ok(!text.includes(s), "a stored hash appeared in a listing");
+    assert.ok(!/password_hash|secret_hash|pbkdf2/i.test(text), "a hash column name or scheme appeared in a listing");
+    assert.ok(!text.includes(key.key as string));
+  }
+});
