@@ -33,11 +33,16 @@ export async function hashPassword(password: string): Promise<string> {
   return `pbkdf2-sha256$${PBKDF2_ITERATIONS}$${b64url(salt)}$${await derive(password, salt, PBKDF2_ITERATIONS)}`;
 }
 
-const DUMMY = hashPassword("bulkhead dummy password for unknown users");
+/**
+ * Verified against when the user is unknown, so that path costs the same PBKDF2 as a real one. It is a precomputed constant,
+ * not hashPassword() at module scope: workerd forbids random values outside a request, and a rejected module-level promise
+ * would be cached, turning every unknown-email login into a 500 and revealing which emails exist.
+ */
+export const DUMMY_HASH = "pbkdf2-sha256$100000$AxQlNkdYaXqLnK2-z-DxAg$DeRUeMMLMGofIub008Lb8FJvpOxBERWQ2JOtWa4dAe8";
 
 /** Verifies against a stored hash. With `null` (unknown user) it still does the full work, so timing does not reveal which emails exist. */
 export async function verifyPassword(password: string, stored: string | null): Promise<boolean> {
-  const [alg, iterations, salt, hash] = (stored ?? (await DUMMY)).split("$");
+  const [alg, iterations, salt, hash] = (stored ?? DUMMY_HASH).split("$");
   const n = Number(iterations);
   if (alg !== "pbkdf2-sha256" || !Number.isInteger(n) || n < 1 || n > PBKDF2_ITERATIONS || !salt || !hash) return false;
   const ok = safeEqual(await derive(password, fromB64url(salt), n), hash);

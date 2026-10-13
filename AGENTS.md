@@ -4,6 +4,8 @@ Bulkhead turns a Cloudflare Workers project into a multi-tenant service, with se
 
 ## Ground rules
 
+- Discipline for every change: a new probe ships with a mutation catalog entry (or a recorded exemption); a decision record's numbered choices cite their check or say why none exists; a green gate is only trusted if the gate itself has been shown able to fail; non-trivial work gets a review by a separate agent before merge.
+
 - The spec is the source of truth. If the spec and the code disagree, the code is wrong.
 - Nothing is done until `verify` passes. Never claim a feature works from reading code.
 - Never bypass hooks, never use `--no-verify`, never edit `verify` or other read-only paths.
@@ -20,7 +22,7 @@ Bulkhead turns a Cloudflare Workers project into a multi-tenant service, with se
 
 ## Current state
 
-Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has not started; DR-0007 proposes its first item.
+Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has started: DR-0007 and DR-0008 are accepted; DR-0009 (accepted) records the automated mutation checks built under them (catalog in `packages/verify/src/mutations.ts`, runner in `scripts/`, decision lint in `packages/spec/`). Crypto work (CRYPTO-*) is not started and needs its own scoping record first.
 
 ## Commands
 
@@ -28,6 +30,8 @@ Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005
 - `pnpm gate:phase1`: phase 0 gate plus the verify self-check (all seeded bugs caught, no false positives).
 - `pnpm gate:phase2`: phase 1 gate, route manifest check, and a black-box verify of the tenancy rules (TENANT-1/4/5) against the demo Worker running in local workerd.
 - `pnpm gate:phase3`: phase 2 gate plus a black-box verify of the auth rules (AUTH-1..4, alongside TENANT-1/4/5) against the demo Worker.
+- `pnpm gate:phase4`: phase 3 gate, then `scripts/mutation-selfcheck.ts` (proves the runner fails on survivors, mis-attribution and stale entries), then `scripts/verify-mutations.ts` (mutates a scratch copy; exactly the named probes must fail; a baseline that already fails is an error).
+- `pnpm spec:lint` (part of every gate) also lints decision records: each numbered choice must cite `Check:` refs or say `No check:` and why; `packages/verify/test/decisions.test.ts` resolves every ref.
 - `node packages/plane/src/cli.ts [--once] [--log-dir .bulkhead]`: terminal view of the event log.
 - `pnpm --filter @kalahroudi/bulkhead-spec catalog`: regenerate `SPEC.md`.
 

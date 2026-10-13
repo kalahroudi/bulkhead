@@ -17,6 +17,7 @@
   },
   "exports": {
     "./eventlog": "./src/eventlog.ts",
-    "./run": "./src/run.ts"
+    "./run": "./src/run.ts",
+    "./mutations": "./src/mutations.ts"
   }
 }
