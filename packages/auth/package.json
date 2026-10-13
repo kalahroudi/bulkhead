@@ -1,7 +1,7 @@
 {
   "name": "@kalahroudi/bulkhead-auth",
-  "version": "0.0.0",
-  "description": "Bulkhead auth: per-tenant users, sessions and scoped API keys on top of the core policy gate.",
+  "version": "0.1.0-preview.0",
+  "description": "Per-tenant users, sessions and API keys for Bulkhead (preview).",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
@@ -9,9 +9,44 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "build": "node ../../scripts/build-package.ts"
   },
   "dependencies": {
     "@kalahroudi/bulkhead-core": "workspace:*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kalahroudi/bulkhead.git",
+    "directory": "packages/auth"
+  },
+  "homepage": "https://github.com/kalahroudi/bulkhead#readme",
+  "bugs": {
+    "url": "https://github.com/kalahroudi/bulkhead/issues"
+  },
+  "keywords": [
+    "bulkhead",
+    "auth",
+    "multi-tenant",
+    "cloudflare-workers"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "tag": "preview",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
   }
 }

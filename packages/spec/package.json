@@ -1,15 +1,51 @@
 {
   "name": "@kalahroudi/bulkhead-spec",
-  "version": "0.0.0",
-  "description": "Bulkhead rule catalog, data classification, decision-record, attestation and event formats. Data and lint only; no runtime code.",
+  "version": "0.1.0-preview.0",
+  "description": "Bulkhead's rule catalog, formats and linters.",
   "license": "Apache-2.0",
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts",
     "lint": "node scripts/lint-spec.ts && node scripts/lint-decisions.ts",
     "catalog": "node scripts/generate-catalog.ts",
-    "catalog:check": "node scripts/generate-catalog.ts --check"
+    "catalog:check": "node scripts/generate-catalog.ts --check",
+    "build": "node ../../scripts/build-package.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kalahroudi/bulkhead.git",
+    "directory": "packages/spec"
+  },
+  "homepage": "https://github.com/kalahroudi/bulkhead#readme",
+  "bugs": {
+    "url": "https://github.com/kalahroudi/bulkhead/issues"
+  },
+  "keywords": [
+    "bulkhead",
+    "spec",
+    "security-rules"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "tag": "preview",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
   }
 }

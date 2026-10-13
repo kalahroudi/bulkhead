@@ -11,18 +11,18 @@ interface DOState {
  */
 export function makeTenantObject<B extends abstract new (...args: any[]) => object>(Base: B) {
   abstract class TenantObject extends Base {
-    private store: TenantStore;
+    #store: TenantStore;
     constructor(...args: any[]) {
       super(...args);
       const ctx = args[0] as DOState;
-      this.store = new TenantStore((sql, params) => {
+      this.#store = new TenantStore((sql, params) => {
         const cursor = ctx.storage.sql.exec(sql, ...params);
         const rows = cursor.toArray();
         return { rows, changes: cursor.rowsWritten };
       });
     }
     async exec(tenantId: string, schema: readonly string[], sql: string, params: unknown[]) {
-      return this.store.run(tenantId, schema, sql, params);
+      return this.#store.run(tenantId, schema, sql, params);
     }
   }
   return TenantObject;

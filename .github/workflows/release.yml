@@ -1,0 +1,32 @@
+name: Release
+# Publishes the preview packages when the owner pushes a tag like v0.1.0-preview.0. Needs, set by the owner:
+#   - an npm automation token in the repository secret NPM_TOKEN (or npm trusted publishing configured for these packages);
+#   - 2FA enforced on the @kalahroudi scope. The builder never holds publish credentials.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+  id-token: write # npm provenance
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm gate:release
+      - name: Publish (build runs in each package; publishConfig sets public access, the preview tag and dist exports)
+        run: |
+          for p in spec core auth verify; do
+            (cd packages/$p && pnpm build)
+          done
+          pnpm --filter "./packages/spec" --filter "./packages/core" --filter "./packages/auth" --filter "./packages/verify" publish --no-git-checks --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

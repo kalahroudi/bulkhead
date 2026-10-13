@@ -1,7 +1,7 @@
 {
   "name": "@kalahroudi/bulkhead-verify",
-  "version": "0.0.0",
-  "description": "Black-box oracle for Bulkhead. Talks to the running app over HTTP only; never imports core.",
+  "version": "0.1.0-preview.0",
+  "description": "Independent black-box verifier for Bulkhead apps: probes, oracles, self-check.",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts",
-    "selfcheck": "node src/cli.ts selfcheck"
+    "selfcheck": "node src/cli.ts selfcheck",
+    "build": "node ../../scripts/build-package.ts"
   },
   "dependencies": {
     "@kalahroudi/bulkhead-spec": "workspace:*"
@@ -19,5 +20,45 @@
     "./eventlog": "./src/eventlog.ts",
     "./run": "./src/run.ts",
     "./mutations": "./src/mutations.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kalahroudi/bulkhead.git",
+    "directory": "packages/verify"
+  },
+  "homepage": "https://github.com/kalahroudi/bulkhead#readme",
+  "bugs": {
+    "url": "https://github.com/kalahroudi/bulkhead/issues"
+  },
+  "keywords": [
+    "bulkhead",
+    "security-testing",
+    "verifier"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "tag": "preview",
+    "exports": {
+      "./eventlog": {
+        "types": "./dist/src/eventlog.d.ts",
+        "default": "./dist/src/eventlog.js"
+      },
+      "./run": {
+        "types": "./dist/src/run.d.ts",
+        "default": "./dist/src/run.js"
+      }
+    },
+    "bin": {
+      "bulkhead-verify": "./dist/src/cli.js"
+    }
   }
 }
