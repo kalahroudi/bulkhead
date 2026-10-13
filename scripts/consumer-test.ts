@@ -24,19 +24,26 @@ const typesSpec = `@cloudflare/workers-types@${wranglerManifest.peerDependencies
 const work = mkdtempSync(join(tmpdir(), "bulkhead-consumer-"));
 let wrangler: ReturnType<typeof spawn> | undefined;
 try {
-  // 1. Build and pack.
+  // 1. Build and pack, unless the release script hands over the exact tarballs it is about to publish.
   const tarballs: string[] = [];
-  mkdirSync(join(work, "tarballs"));
-  for (const p of PUBLIC) {
-    const dir = join(root, "packages", p);
-    const b = run("pnpm", ["build"], dir);
-    check(b.status === 0, `${p}: builds${b.status === 0 ? "" : `\n${b.stdout}${b.stderr}`}`);
-    const pk = run("pnpm", ["pack", "--pack-destination", join(work, "tarballs")], dir);
-    check(pk.status === 0, `${p}: packs${pk.status === 0 ? "" : `\n${pk.stdout}${pk.stderr}`}`);
+  const given = process.env.CONSUMER_TARBALL_DIR;
+  if (given) {
+    for (const f of readdirSync(given).sort()) tarballs.push(join(given, f));
+    check(true, `testing the ${tarballs.length} tarballs supplied in CONSUMER_TARBALL_DIR (the same files that get published)`);
+  } else {
+    mkdirSync(join(work, "tarballs"));
+    for (const p of PUBLIC) {
+      const dir = join(root, "packages", p);
+      const b = run("pnpm", ["build"], dir);
+      check(b.status === 0, `${p}: builds${b.status === 0 ? "" : `\n${b.stdout}${b.stderr}`}`);
+      const pk = run("pnpm", ["pack", "--pack-destination", join(work, "tarballs")], dir);
+      check(pk.status === 0, `${p}: packs${pk.status === 0 ? "" : `\n${pk.stdout}${pk.stderr}`}`);
+    }
+    for (const f of readdirSync(join(work, "tarballs"))) tarballs.push(join(work, "tarballs", f));
   }
-  for (const f of readdirSync(join(work, "tarballs"))) tarballs.push(join(work, "tarballs", f));
-  check(tarballs.length === PUBLIC.length, `${tarballs.length} tarballs produced`);
+  check(tarballs.length === PUBLIC.length, `${tarballs.length} tarballs to test`);
 
+  const versions = new Set<string>();
   // 2. Tarball contents: only dist, README, LICENSE and package.json; the published manifest points at dist and has no workspace refs.
   for (const t of tarballs) {
     const files = run("tar", ["-tzf", t], work).stdout.split("\n").filter(Boolean).map((f) => f.replace(/^package\//, ""));
@@ -49,9 +56,13 @@ try {
     const text = JSON.stringify(manifest);
     const targets = Object.values(manifest.exports ?? {}).flatMap((e) => (typeof e === "string" ? [e] : Object.values(e as Record<string, string>))).concat(Object.values((manifest.bin ?? {}) as Record<string, string>));
     check(!text.includes("workspace:") && targets.length > 0 && targets.every((t) => t.startsWith("./dist/")), `${manifest.name}: no workspace refs, and every export and bin target is under ./dist/`);
-    check(/^0\.1\.0-preview\.\d+$/.test(manifest.version) && manifest.license === "Apache-2.0" && manifest.publishConfig?.access === "public" && manifest.publishConfig?.tag === "preview" && manifest.publishConfig?.exports === undefined, `${manifest.name}@${manifest.version}: preview version, Apache-2.0, publishes public under the preview tag`);
+    versions.add(manifest.version);
+    // The dist-tag follows the version: `1.2.3` -> latest, `0.1.0-preview.2` -> preview, `1.0.0-rc.1` -> rc.
+    const expectedTag = manifest.version.includes("-") ? manifest.version.split("-")[1].split(".")[0] : "latest";
+    check(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$/.test(manifest.version) && manifest.license === "Apache-2.0" && manifest.publishConfig?.access === "public" && manifest.publishConfig?.tag === expectedTag && manifest.publishConfig?.exports === undefined, `${manifest.name}@${manifest.version}: valid version, Apache-2.0, publishes public under the "${expectedTag}" tag`);
   }
 
+  check(versions.size === 1, `all packages carry one version (${[...versions].join(", ")})`);
   // 3. Install into a clean project.
   const app = join(work, "app");
   mkdirSync(join(app, "src"), { recursive: true });

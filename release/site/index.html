@@ -28,12 +28,12 @@
   </ul>
 
   <h2 id="quickstart">Quickstart</h2>
-  <pre><code>npm install @kalahroudi/bulkhead-core @kalahroudi/bulkhead-auth
+  <pre><code>npm install @kalahroudi/bulkhead-core@preview @kalahroudi/bulkhead-auth@preview
 npm install -D wrangler @cloudflare/workers-types</code></pre>
   <p>The complete <code>wrangler.jsonc</code> and <code>src/index.ts</code>, the commands to claim the first owner and sign in, and the production notes are in the <a href="https://github.com/flamingosh/bulkhead#quickstart">README</a>. That code is the tested quickstart: it is extracted from the README, typechecked against the published packages, and driven end to end on every release.</p>
 
   <h2 id="verify">Verify</h2>
-  <pre><code>npx bulkhead-verify selfcheck</code></pre>
+  <pre><code>npx @kalahroudi/bulkhead-verify@preview selfcheck</code></pre>
   <p>Proves the verifier catches its own seeded bugs and raises no false alarms; it needs no app. <code>bulkhead-verify run --target &lt;url&gt;</code> attacks a running app, but today its probes expect a few probe-contract routes that only the demo app exposes; the README explains how to add them to a non-production copy of your app. A packaged helper is planned.</p>
 
   <h2 id="packages">Packages</h2>
@@ -50,7 +50,7 @@ npm install -D wrangler @cloudflare/workers-types</code></pre>
     <li>Encryption of sensitive fields at rest, and write-only secrets</li>
     <li>Billing, and tenant provisioning (production tenants are rows you insert by hand today)</li>
     <li>Password reset, email verification, MFA, SSO, a per-IP login throttle</li>
-    <li>Independent audit and signed attestation of the rules</li>
+    <li>An independent audit of the rules</li>
   </ul>
 </main>
 <footer><div class="wrap">Apache-2.0 &middot; <a href="https://github.com/flamingosh/bulkhead">Source</a> &middot; <a href="https://github.com/flamingosh/bulkhead/blob/main/CHANGELOG.md">Changelog</a> &middot; <a href="https://github.com/flamingosh/bulkhead/security">Report a vulnerability</a></div></footer>

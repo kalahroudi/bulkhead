@@ -14,7 +14,7 @@ Multi-tenant security for Cloudflare Workers, enforced by structure and checked 
 ## Quickstart
 
 ```sh
-npm install @kalahroudi/bulkhead-core @kalahroudi/bulkhead-auth
+npm install @kalahroudi/bulkhead-core@preview @kalahroudi/bulkhead-auth@preview
 npm install -D wrangler @cloudflare/workers-types
 ```
 
@@ -87,14 +87,14 @@ The repository's [`examples/demo-app`](examples/demo-app) is a complete, tested 
 ## Verify it
 
 ```sh
-npx bulkhead-verify selfcheck    # proves the verifier catches its own seeded bugs; needs no app
+npx @kalahroudi/bulkhead-verify@preview selfcheck    # proves the verifier catches its own seeded bugs; needs no app
 ```
 
 `bulkhead-verify run --target <url>` attacks a running app, but today its probes expect a small set of **probe-contract routes** (`/whoami`, `/notes`, `/summary`, `/private/member|admin|owner`) that only [`examples/demo-app`](examples/demo-app) exposes. To verify your own app, add those routes to a non-production copy of it (see `examples/demo-app/src/routes.ts`), set `BULKHEAD_BASE_DOMAIN` to `demo.localhost` (the probes address tenants as `<name>.demo.localhost`), start it with a bootstrap secret of at least 32 characters, and run:
 
 ```sh
 BULKHEAD_VERIFY_BOOTSTRAP_TOKEN=<the same 32+ character secret> \
-  npx bulkhead-verify run --target http://127.0.0.1:8787 --rules TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4
+  npx @kalahroudi/bulkhead-verify@preview run --target http://127.0.0.1:8787 --rules TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4
 ```
 
 A packaged probe-route helper is planned, not built. `run` refuses non-loopback targets unless you register them. Findings and the event log go to `.bulkhead/`.
