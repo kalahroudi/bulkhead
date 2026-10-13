@@ -144,9 +144,13 @@ export const mutations: Mutation[] = [
       { file: "packages/core/src/tenant/store.ts", find: 'else if (bound !== tenantId) throw new Error("tenant mismatch");', replace: "" },
       { file: "packages/core/src/tenant/store.ts", find: 'else if (this.exec("select value from _bulkhead_meta where key = \'tenant_id\'", []).rows[0]?.value !== tenantId) throw new Error("tenant mismatch");', replace: "" },
     ],
+    // The probes that bootstrap or sign in on a throwaway tenant (ownerTenant, bootstrap-*) also fail: with one shared database
+    // the "fresh" tenant is already claimed, so setup (a 409 on bootstrap) cannot succeed. Legitimate, like the older entries.
     expect: [
-      "add-tenant-metamorphic", "api-key-scope", "authority-matrix", "cache-canary", "cookie-flags", "cross-tenant-session",
-      "csrf-origin", "disabled-user-denied", "key-revocation", "logout-revokes", "notes-list-canary", "role-change-revokes", "role-matrix",
+      "add-tenant-metamorphic", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "bootstrap-token-required", "cache-canary",
+      "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling",
+      "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "notes-list-canary", "role-change-authority",
+      "role-change-revokes", "role-matrix",
     ],
   },
   {
