@@ -1,6 +1,6 @@
 # DR-0007: Automate mutation checks as the first item of Phase 4
 
-- Status: accepted (owner approved in session on 2026-10-13; cryptographic signature pending)
+- Status: proposed (owner acceptance and signature pending; the builder cannot accept its own record)
 - Date: 2026-10-12
 - Rules: VERIFY-4 (and, through it, every rule with a probe)
 
@@ -17,21 +17,21 @@ Make mutation checking part of the gate, and do it before any Phase 4 feature wo
 1. **A mutation catalog** lives next to the seeded-bug catalog: each entry names a file, a textual
    mutation (an exact-match replacement that must apply, otherwise the check errors rather than skipping),
    and the probe ids that must fail. A mutation that applies but fails no probe flags that scenario
-   worthless; a mutation that fails an unexpected probe flags a mis-attributed one. Check: `test:packages/verify/test/mutations.test.ts::catalog ids are unique`, `script:scripts/verify-mutations.ts`.
+   worthless; a mutation that fails an unexpected probe flags a mis-attributed one.
 2. **The runner mutates a scratch copy** of the workspace, never the working tree, and boots the demo
    Worker in workerd against it, as `scripts/verify-kernel.ts` already does. The working tree is
-   never edited, so an interrupted run cannot leave broken code behind. Check: `script:scripts/mutation-selfcheck.ts` (the runner is shown to reject survivors, mis-attribution and stale entries).
+   never edited, so an interrupted run cannot leave broken code behind.
 3. **Seed the catalog with every mutation already proven by hand** (role-change revocation, key
    permission check, origin comparison, no-header CSRF fallback, `disabled` checks, login rotation),
-   so the first run is a regression test of the practice itself. Check: `test:packages/verify/test/mutations.test.ts::every expected probe id is a real probe`, `mutation:csrf-origin-ignored`, `mutation:role-change-keeps-sessions`, `mutation:login-no-rotation`.
+   so the first run is a regression test of the practice itself.
 4. **Gate:** `gate:phase4` runs the catalog. A phase cannot be accepted with a catalog entry that
-   applied and survived. New probes in a phase must arrive with at least one catalog entry. Check: `gate:phase4`, `test:packages/verify/test/mutations.test.ts::DR-0007 item 4`.
+   applied and survived. New probes in a phase must arrive with at least one catalog entry.
 5. **Decision records get checks:** each numbered design choice in a DR that names a rule must either
    cite the probe or test that enforces it, or say why none can exist yet. A lint in the spec package
-   fails otherwise, so a recorded decision cannot silently drift from the code (the CSRF fallback case). Check: `test:packages/spec/test/decisions.test.ts::a choice with neither Check nor No check fails`, `test:packages/verify/test/decisions.test.ts::every ref`.
+   fails otherwise, so a recorded decision cannot silently drift from the code (the CSRF fallback case).
 
 Edits touch `packages/verify/` (catalog, runner) and `packages/spec/` (DR lint), both frozen, so they
-need this record accepted first and a separate attacker session to review the catalog. Both happened; see DR-0009.
+need this record accepted first and a separate attacker session to review the catalog.
 
 ## Consequences
 - Gate time grows by one workerd boot per mutation batch; mutations that hit unrelated probes can share

@@ -53,23 +53,23 @@ Accept the edits above and these design choices and limits, so each is a decisio
 1. **Bootstrap is the interim way in.** `POST /auth/bootstrap` creates the first owner of an empty
    tenant and needs `BULKHEAD_BOOTSTRAP_TOKEN`; the auth package treats a secret shorter than 32
    characters, or none, as bootstrap disabled. Phase 6 provisioning should create owners directly and
-   bootstrap can then be removed. Check: `test:packages/auth/test/auth.test.ts::bootstrap`.
+   bootstrap can then be removed.
 2. **Passwords use PBKDF2-SHA256 at 100,000 iterations**, the maximum Workers' WebCrypto allows. That
    is below current OWASP guidance for PBKDF2. Parameters are stored per hash so they can be raised
    or the scheme replaced without a flag day. Login is throttled per email (5 failures per 15
-   minutes, per tenant); there is no per-IP throttle yet. Check: `test:packages/auth/test/auth.test.ts::passwords: salted PBKDF2`, `test:packages/auth/test/auth.test.ts::login: one answer`. No check: no black-box probe covers the login throttle or PBKDF2 parameters, and there is no per-IP throttle to check.
+   minutes, per tenant); there is no per-IP throttle yet.
 3. **Sessions**: 256-bit random token, only its SHA-256 stored, `__Host-` cookie (Secure, HttpOnly,
    Path=/, no Domain, SameSite=Lax), 7-day absolute and 24-hour idle lifetime. Login rotates;
    logout, role change and disable revoke. Cookie-authenticated writes also need a same-origin
    `Origin` or `Sec-Fetch-Site`; a write carrying neither is refused (a non-browser client presents a
-   bearer key instead). Safari does not accept `Secure` cookies over plain-http localhost. Check: `probe:cookie-flags`, `probe:session-rotation`, `probe:csrf-origin`, `mutation:csrf-no-header-allowed`, `mutation:csrf-origin-ignored`, `mutation:cookie-not-httponly`, `test:packages/auth/test/auth.test.ts::sessions expire`.
+   bearer key instead). Safari does not accept `Secure` cookies over plain-http localhost.
 4. **API keys**: `bkk_<id>_<secret>`, secret stored as a hash, shown once, never listable. A key
    carries a role (capped at its minter's role, re-capped at each use) and a permission list that
-   must name permissions routes actually declare. Role change or disable of the minter revokes it. Check: `probe:api-key-scope`, `probe:key-revocation`, `mutation:key-permission-ignored`, `test:packages/auth/test/auth.test.ts::AUTH-4: keys are tenant-bound`.
+   must name permissions routes actually declare. Role change or disable of the minter revokes it.
 5. **Role changes**: nobody grants or touches a role above their own, and the last owner cannot be
-   demoted or disabled. Check: `probe:authority-matrix`, `mutation:grant-above-own-role`, `test:packages/auth/test/auth.test.ts::user management cannot escalate`.
+   demoted or disabled.
 6. **Auth tables are append-only schema steps** (`authSchema`), tracked by index, so apps pass
-   `[...authSchema, ...theirs]`. Reordering would corrupt existing tenants. No check: nothing tests that the auth schema steps keep their order, so a reorder would only be caught by review; a migration-order test is owed.
+   `[...authSchema, ...theirs]`. Reordering would corrupt existing tenants.
 
 Known limits, none of them silent:
 - AUTH-4's "stored only as hashes" is not observable over HTTP; it is covered by unit tests that
