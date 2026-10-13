@@ -35,4 +35,5 @@ export const seededBugs: SeededBug[] = [
   { id: "tenant-from-forwarded-host", description: "Tenant taken from a client-supplied x-forwarded-host header", probeIds: ["identity-header-differential"] },
   { id: "unknown-email-login-errors", description: "Login for an unknown email fails with a 500 instead of the same 401 as a wrong password", probeIds: ["unknown-email-login-same-answer"] },
   { id: "key-secret-length-ignored", description: "An API key is accepted when the presented secret merely starts with the real one (extra characters appended)", probeIds: ["key-wrong-secret-denied"] },
+  { id: "admin-user-create-refused", description: "POST /users refuses every admin with 403, so an admin's denials on role changes prove nothing (the positive control must catch this)", probeIds: ["role-change-authority"] },
 ];

@@ -18,6 +18,8 @@ writeFileSync(catalog, `export const mutations = [
   { id: "canary-gap-survivor", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "// Compare against a hash even when the key is unknown so lookups take the same path.", replace: "// edited for the gap canary", expect: [], gap: "canary: nothing protects a comment" },
   // Stale second edit: an extra edit (also) that matches nothing must error too, not be skipped.
   { id: "canary-also-stale", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "return new URL(origin).host === new URL(req.url).host;", replace: "return true;", also: [{ file: ${JSON.stringify(AUTH)}, find: "this text is not in the file either", replace: "x" }], expect: ["csrf-origin"] },
+  // Consumed target: the second edit looks for text the first edit already replaced, so it matches nothing by the time it runs.
+  { id: "canary-also-consumed", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "return new URL(origin).host === new URL(req.url).host;", replace: "return true;", also: [{ file: ${JSON.stringify(AUTH)}, find: "return new URL(origin).host === new URL(req.url).host;", replace: "return false;" }], expect: ["csrf-origin"] },
   // Stale entry: the line it targets does not exist, which must error instead of being skipped.
   { id: "canary-stale", rule: "AUTH-2", file: ${JSON.stringify(AUTH)}, find: "this text is not in the file", replace: "x", expect: ["csrf-origin"] },
 ];\n`);
@@ -26,6 +28,7 @@ const must: [string, RegExp][] = [
   ["a survivor", /FAIL canary-survivor .*SURVIVED/],
   ["a mis-attributed kill", /FAIL canary-misattributed .*SURVIVED.*mis-attributed/],
   ["a stale find string", /FAIL canary-stale: find string matched 0 time/],
+  ["a second edit whose target the first one consumed", /FAIL canary-also-consumed: find string matched 0 time\(s\) in .* \(edit 2\)/],
   ["a gap nothing protects", /FAIL canary-gap-survivor .*SURVIVED verify and unit tests/],
   ["a stale `also` edit", /FAIL canary-also-stale: find string matched 0 time/],
 ];

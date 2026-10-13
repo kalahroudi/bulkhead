@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Ask the OS for a free loopback port so a busy 8787 does not fail the gate. */
 function freePort(): Promise<number> {
@@ -20,7 +21,7 @@ function freePort(): Promise<number> {
   });
 }
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 const demo = join(root, "examples/demo-app");
 const persist = mkdtempSync(join(tmpdir(), "bulkhead-demo-state-"));
 const logDir = mkdtempSync(join(tmpdir(), "bulkhead-demo-log-"));

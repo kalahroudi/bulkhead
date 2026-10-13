@@ -6,7 +6,7 @@ const ALL = [
   "missing-tenant-filter", "shared-cache-key", "skipped-signature-check", "tenant-from-header",
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
   "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
-  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors", "key-secret-length-ignored",
+  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors", "key-secret-length-ignored", "admin-user-create-refused",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -121,7 +121,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
   if (method === "POST" && path === "/users") {
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
-    if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    if (RANK[p.role] < RANK.admin || (bugs.has("admin-user-create-refused") && p.role === "admin")) return reply(403, { error: "forbidden" });
     const b = json();
     const wanted = b.role as Role;
     if (!bugs.has("escalation-allowed") && RANK[wanted] > RANK[p.role]) return reply(403, { error: "cannot grant a role above your own" });
