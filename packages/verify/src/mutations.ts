@@ -140,7 +140,7 @@ export const mutations: Mutation[] = [
     ],
     expect: [
       "add-tenant-metamorphic", "api-key-scope", "authority-matrix", "cache-canary", "cookie-flags", "cross-tenant-session",
-      "csrf-origin", "key-revocation", "logout-revokes", "notes-list-canary", "role-change-revokes", "role-matrix",
+      "csrf-origin", "disabled-user-denied", "key-revocation", "logout-revokes", "notes-list-canary", "role-change-revokes", "role-matrix",
     ],
   },
   {
@@ -166,7 +166,7 @@ export const mutations: Mutation[] = [
     id: "unknown-session-gets-default-role", rule: "AUTH-1", file: AUTH,
     find: "if (!row || !isRole(row.role)) return null;",
     replace: 'if (!row || !isRole(row.role)) return { id: "anonymous", role: "member" };',
-    expect: ["cross-tenant-session", "logout-revokes", "no-default-role", "role-change-revokes", "session-rotation"],
+    expect: ["cross-tenant-session", "disabled-user-denied", "logout-revokes", "no-default-role", "role-change-revokes", "session-rotation"],
   },
   {
     id: "key-revoked-check-removed", rule: "AUTH-4", file: AUTH,
