@@ -269,10 +269,11 @@ test("listings expose metadata only: no password hash and no key secret hash, by
 });
 
 test("unknown-user login verifies against a well-formed constant hash, with no module-scope randomness", async () => {
-  const { DUMMY_HASH } = await import("../src/secrets.ts");
+  const { DUMMY_HASH, PBKDF2_ITERATIONS } = await import("../src/secrets.ts");
   const [alg, iterations, salt, hash] = DUMMY_HASH.split("$");
   assert.equal(alg, "pbkdf2-sha256");
-  assert.equal(Number(iterations), 100_000, "same work factor as a real hash, so timing matches");
+  assert.equal(Number(iterations), PBKDF2_ITERATIONS, "same work factor as a real hash, so timing matches; raising the real constant must fail this until DUMMY_HASH is regenerated");
+  assert.equal(Number((await hashPassword("x")).split("$")[1]), PBKDF2_ITERATIONS, "and a freshly made hash really uses the exported constant");
   assert.ok(salt && hash);
   assert.equal(await verifyPassword("anything at all", null), false);
   assert.equal(await verifyPassword("bulkhead dummy password for unknown users", null), false, "the dummy must never authenticate anyone");

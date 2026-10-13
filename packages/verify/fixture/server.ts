@@ -6,7 +6,7 @@ const ALL = [
   "missing-tenant-filter", "shared-cache-key", "skipped-signature-check", "tenant-from-header",
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
   "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
-  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors",
+  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors", "key-secret-length-ignored", "admin-user-create-refused", "listing-leaks-digest", "listing-leaks-token",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -62,7 +62,7 @@ function principal(tenant: string, headers: Record<string, string | string[] | u
   if (authz) {
     const m = /^Bearer bkk_([0-9a-f]{16})_(\S+)$/.exec(authz);
     const k = m && keys.get(m[1] as string);
-    if (!k || (k.secret !== m[2] && !bugs.has("key-secret-unchecked"))) return null;
+    if (!k || (k.secret !== m[2] && !bugs.has("key-secret-unchecked") && !(bugs.has("key-secret-length-ignored") && (m[2] as string).startsWith(k.secret)))) return null;
     if (k.revoked && !bugs.has("key-revocation-ignored")) return null;
     if (k.tenant !== tenant && !bugs.has("api-key-cross-tenant")) return null;
     return { role: k.role, perms: k.permissions, id: `key:${m[1]}` };
@@ -116,12 +116,12 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
     if (RANK[p.role] < (bugs.has("member-can-list-users") ? RANK.member : RANK.admin)) return reply(403, { error: "forbidden" });
-    return reply(200, { users: tenantUsers(tenant).map((u) => ({ id: u.id, email: u.email, role: u.role, disabled: u.disabled ? 1 : 0, ...(bugs.has("listing-leaks-hash") ? { password_hash: `pbkdf2$100000$${token(8)}$${token(32)}` } : {}) })) });
+    return reply(200, { users: tenantUsers(tenant).map((u) => ({ id: u.id, email: u.email, role: u.role, disabled: u.disabled ? 1 : 0, ...(bugs.has("listing-leaks-digest") ? { digest: randomBytes(32).toString("hex") } : {}), ...(bugs.has("listing-leaks-hash") ? { password_hash: `pbkdf2$100000$${token(8)}$${token(32)}` } : {}) })) });
   }
   if (method === "POST" && path === "/users") {
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
-    if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    if (RANK[p.role] < RANK.admin || (bugs.has("admin-user-create-refused") && p.role === "admin")) return reply(403, { error: "forbidden" });
     const b = json();
     const wanted = b.role as Role;
     if (!bugs.has("escalation-allowed") && RANK[wanted] > RANK[p.role]) return reply(403, { error: "cannot grant a role above your own" });
@@ -187,7 +187,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
     if (RANK[p.role] < (bugs.has("member-can-list-users") ? RANK.member : RANK.admin)) return reply(403, { error: "forbidden" });
-    return reply(200, { keys: [...keys].filter(([, k]) => k.tenant === tenant).map(([id, k]) => ({ id, role: k.role, permissions: k.permissions, ...(bugs.has("listing-leaks-hash") ? { secret_hash: createHash("sha256").update(k.secret).digest("hex") } : {}) })) });
+    return reply(200, { keys: [...keys].filter(([, k]) => k.tenant === tenant).map(([id, k]) => ({ id, role: k.role, permissions: k.permissions, ...(bugs.has("listing-leaks-token") ? { x: token(32) } : {}), ...(bugs.has("listing-leaks-hash") ? { secret_hash: createHash("sha256").update(k.secret).digest("hex") } : {}) })) });
   }
   return null;
 }
