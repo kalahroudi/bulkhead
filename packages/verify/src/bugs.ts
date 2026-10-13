@@ -25,4 +25,12 @@ export const seededBugs: SeededBug[] = [
   { id: "escalation-allowed", description: "An admin can create a user with a role above their own", probeIds: ["authority-matrix"] },
   { id: "key-revocation-ignored", description: "A revoked API key, or one whose minter was demoted, keeps working", probeIds: ["key-revocation"] },
   { id: "disabled-user-can-login", description: "A disabled user can still log in with the right password", probeIds: ["disabled-user-denied"] },
+  { id: "key-secret-unchecked", description: "An API key is accepted on its id alone; the secret is never compared", probeIds: ["key-wrong-secret-denied"] },
+  { id: "bootstrap-token-unchecked", description: "First-owner bootstrap accepts any string as the bootstrap token", probeIds: ["bootstrap-token-required"] },
+  { id: "bootstrap-second-owner", description: "Bootstrap with the right token still succeeds after the tenant has an owner", probeIds: ["bootstrap-claims-once"] },
+  { id: "role-patch-escalation", description: "PATCH /users/:id/role lets an admin set a role above their own", probeIds: ["role-change-authority"] },
+  { id: "admin-modifies-owner", description: "An admin may change the role of, or disable, a user above their own role", probeIds: ["role-change-authority"] },
+  { id: "key-above-minter-role", description: "An admin may mint an API key with a role above their own", probeIds: ["key-role-ceiling"] },
+  { id: "listing-leaks-hash", description: "The user and API-key listings include password and secret hashes", probeIds: ["listings-hide-secrets"] },
+  { id: "tenant-from-forwarded-host", description: "Tenant taken from a client-supplied x-forwarded-host header", probeIds: ["identity-header-differential"] },
 ];
