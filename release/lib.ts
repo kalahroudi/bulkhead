@@ -42,6 +42,10 @@ export const FIXES: Fix[] = [
   { file: "packages/spec/src/rules.ts", find: " (Phase 1+).", replace: "." },
   { file: "examples/demo-app/scripts/manifest.ts", find: "which CODEOWNERS routes to the owner (ROUTE-3)", replace: "so that review can see it (ROUTE-3)" },
   { file: "packages/spec/test/spec.test.ts", find: '"DR-0001"', replace: '"DR-9001"' },
+  { file: "packages/spec/src/decisions.ts", find: " * DR-0007 item 5: every numbered choice", replace: " * Every numbered choice" },
+  { file: "packages/verify/src/oracles.ts", find: "Phase 1 implements the three the probes need; metamorphic and state land with their packs.", replace: "Three are implemented today because the probes need them; metamorphic and state land with their packs." },
+  { file: "packages/verify/test/verify.test.ts", find: " (Phase 1 gate)", replace: "" },
+  { file: "scripts/verify-kernel.ts", find: "// Phase 2 gate harness:", replace: "// Gate harness:" },
 ];
 
 // --- Leak scan: anything that points at the private repo, its records, its docs, or how it is built. ---
