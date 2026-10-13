@@ -20,7 +20,7 @@ Bulkhead turns a Cloudflare Workers project into a multi-tenant service, with se
 
 ## Current state
 
-Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has not started; DR-0007 proposes its first item.
+Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005). Phase 3 (auth) is accepted (DR-0006). Phase 4 has started: DR-0007 (proposed) and DR-0008 (proposed) cover automated mutation checks, with an interim runner in `scripts/`.
 
 ## Commands
 
@@ -28,6 +28,7 @@ Phase 0 is accepted (DR-0003). Phase 1 is accepted. Phase 2 is accepted (DR-0005
 - `pnpm gate:phase1`: phase 0 gate plus the verify self-check (all seeded bugs caught, no false positives).
 - `pnpm gate:phase2`: phase 1 gate, route manifest check, and a black-box verify of the tenancy rules (TENANT-1/4/5) against the demo Worker running in local workerd.
 - `pnpm gate:phase3`: phase 2 gate plus a black-box verify of the auth rules (AUTH-1..4, alongside TENANT-1/4/5) against the demo Worker.
+- `pnpm gate:phase4`: phase 3 gate plus the mutation catalog (`scripts/verify-mutations.ts`), which mutates a scratch copy and requires the named probes to fail.
 - `node packages/plane/src/cli.ts [--once] [--log-dir .bulkhead]`: terminal view of the event log.
 - `pnpm --filter @kalahroudi/bulkhead-spec catalog`: regenerate `SPEC.md`.
 
