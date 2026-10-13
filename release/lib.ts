@@ -17,7 +17,7 @@ export const PACKAGES = [
 
 // --- What ships: an allowlist, so a new private file can never leak by being added. ---
 const ALLOW = [
-  /^packages\/(spec|core|auth|verify|plane)\//,
+  /^packages\/(spec|core|auth|verify)\//,
   /^examples\/demo-app\//,
   /^(README\.md|CHANGELOG\.md|LICENSE|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig\.base\.json|\.gitignore)$/,
   /^scripts\/(build-package|consumer-test|verify-kernel)\.ts$/,
@@ -40,13 +40,44 @@ export const FIXES: Fix[] = [
   { file: "packages/spec/src/types.ts", find: "The scenario is written in Phase 1+.", replace: "The scenario is written as the rule is verified." },
   { file: "packages/spec/src/formats.ts", find: "arrive in Phase 1+.", replace: "are planned." },
   { file: "packages/spec/src/rules.ts", find: " (Phase 1+).", replace: "." },
-  { file: "examples/demo-app/scripts/manifest.ts", find: "which CODEOWNERS routes to the owner (ROUTE-3)", replace: "so that review can see it (ROUTE-3)" },
+  { file: "examples/demo-app/scripts/manifest.ts", find: "which CODEOWNERS routes to the owner (ROUTE-3)", replace: "so that review can see it" },
   { file: "packages/spec/test/spec.test.ts", find: '"DR-0001"', replace: '"DR-9001"' },
   { file: "packages/spec/src/decisions.ts", find: " * DR-0007 item 5: every numbered choice", replace: " * Every numbered choice" },
   { file: "packages/verify/src/oracles.ts", find: "Phase 1 implements the three the probes need; metamorphic and state land with their packs.", replace: "Three are implemented today because the probes need them; metamorphic and state land with their packs." },
   { file: "packages/verify/test/verify.test.ts", find: " (Phase 1 gate)", replace: "" },
   { file: "scripts/verify-kernel.ts", find: "// Phase 2 gate harness:", replace: "// Gate harness:" },
+  // The event-log viewer is internal tooling and does not ship, so its workspace entry leaves the lockfile too.
+  { file: "pnpm-lock.yaml", find: "  packages/plane:\n    dependencies:\n      '@kalahroudi/bulkhead-spec':\n        specifier: workspace:*\n        version: link:../spec\n    devDependencies:\n      '@kalahroudi/bulkhead-verify':\n        specifier: workspace:*\n        version: link:../verify\n\n", replace: "" },
+  { file: "packages/spec/src/formats.ts", find: "Signature by the human key on accepted records.", replace: "Signature on accepted records." },
+  { file: "packages/spec/src/formats.ts", find: "/** Signature by the human key. */", replace: "/** Signature. */" },
+  { file: "packages/verify/test/verify.test.ts", find: '["TENANT-9"]', replace: '["NOSUCH-9"]' },
+  { file: "packages/verify/src/targets.ts", find: "// VERIFY-5: only loopback", replace: "// Only loopback" },
+  { file: "packages/verify/src/run.ts", find: "/** VERIFY-3: the run is invalid", replace: "/** The run is invalid" },
+  { file: "packages/spec/src/formats.ts", find: " (GATE-1).", replace: "." },
+  { file: "packages/spec/src/formats.ts", find: "honest-limits statement (SPEC-4).", replace: "honest-limits statement." },
+  { file: "packages/spec/src/formats.ts", find: "all seeded bugs found (VERIFY-3)", replace: "all seeded bugs found" },
+  { file: "packages/spec/src/formats.ts", find: "open confirmed findings (VERIFY-6)", replace: "open confirmed findings" },
+  { file: "packages/spec/src/formats.ts", find: "keeps its reproduction (VERIFY-2).", replace: "keeps its reproduction." },
+  { file: "packages/spec/src/formats.ts", find: "Unsigned producers are untrusted (PLANE-2).", replace: "Unsigned producers are untrusted." },
+  { file: "packages/spec/src/formats.ts", find: "(unsigned events are untrusted, PLANE-2)", replace: "(unsigned events are untrusted)" },
 ];
+
+// --- The public rule catalog: product guarantees only. How the project is built, attested and supervised stays private. ---
+const CATALOG_FILE = "packages/spec/src/rules.ts";
+/** Drops ROUTE-3 (describes the internal review process) and every rule from the Verify section to the end of the list. */
+export function publicCatalog(text: string): string {
+  const cut = (from: string, to: string, what: string) => {
+    const a = text.indexOf(from);
+    const b = text.indexOf(to, a + from.length);
+    if (a < 0 || b < 0 || text.indexOf(from, a + 1) >= 0) throw new Error(`rule catalog layout changed: cannot find ${what} exactly once`);
+    text = text.slice(0, a) + text.slice(b);
+  };
+  cut('  {\n    id: "ROUTE-3",', '  {\n    id: "ROUTE-4",', "the ROUTE-3 block");
+  cut("  // --- Verify ---", "];\n\nexport const SPEC_VERSION", "the Verify..Plane sections");
+  return text;
+}
+export const publicRuleIds = (rulesText: string) => new Set([...rulesText.matchAll(/^\s+id: "([A-Z]+-\d+)"/gm)].map((m) => m[1] as string));
+const RULE_REF = /\b(TENANT|ROUTE|AUTH|CRYPTO|BOOT|BILL|DOMAIN|HTTP|LIFE|VERIFY|GATE|SPEC|PLANE)-\d+\b/g;
 
 // --- Leak scan: anything that points at the private repo, its records, its docs, or how it is built. ---
 export const LEAK_PATTERNS: [string, RegExp][] = [
@@ -57,17 +88,23 @@ export const LEAK_PATTERNS: [string, RegExp][] = [
   ["agent or session provenance", /claude|anthropic|Co-Authored-By|Claude-Session|attacker session/i],
   ["personal address", /bermouda/i],
   ["unfinished owner todo", /TODO\(owner\)/],
+  ["internal process wording", /development plane|agent[- ]harness|signed human review|human key|keychain/i],
 ];
 const TEXT = /\.(ts|js|json|jsonc|md|yml|yaml|html|css|txt|toml)$|(^|\/)(\.gitignore|LICENSE)$/;
 
 export function scanForLeaks(dir: string): string[] {
   const hits: string[] = [];
+  const catalog = join(dir, CATALOG_FILE);
+  const known = existsSync(catalog) ? publicRuleIds(readFileSync(catalog, "utf8")) : null;
   for (const file of walk(dir)) {
     const rel = relative(dir, file);
     if (/(^|\/)(pnpm-lock\.yaml)$/.test(rel) || !TEXT.test(rel)) continue;
     const lines = readFileSync(file, "utf8").split("\n");
     lines.forEach((line, i) => {
       for (const [why, re] of LEAK_PATTERNS) if (re.test(line)) hits.push(`${rel}:${i + 1} [${why}] ${line.trim().slice(0, 140)}`);
+      // A shipped file may only cite rules that exist in the public catalog; anything else points at the private spec.
+      if (known && rel !== CATALOG_FILE)
+        for (const m of line.matchAll(RULE_REF)) if (!known.has(m[0])) hits.push(`${rel}:${i + 1} [rule id not in the public catalog] ${m[0]}`);
     });
   }
   return hits;
@@ -106,6 +143,9 @@ export function buildExport({ root, out, version, templates = join(root, "releas
     writeFileSync(p, text.replace(fix.find, () => fix.replace));
   }
 
+  const catalogPath = join(out, CATALOG_FILE);
+  writeFileSync(catalogPath, publicCatalog(readFileSync(catalogPath, "utf8")));
+
   // The private repo's own URL becomes the public one everywhere it is written out in full.
   for (const file of walk(out)) {
     if (!TEXT.test(relative(out, file))) continue;
@@ -114,7 +154,7 @@ export function buildExport({ root, out, version, templates = join(root, "releas
   }
 
   // package.json files: release version, public URLs, and scripts that only make sense in the private repo removed.
-  for (const dir of [...PACKAGES.map((p) => p.dir), "packages/plane", "examples/demo-app", "."]) {
+  for (const dir of [...PACKAGES.map((p) => p.dir), "examples/demo-app", "."]) {
     const p = join(out, dir, "package.json");
     if (!existsSync(p)) continue;
     const j = JSON.parse(readFileSync(p, "utf8"));

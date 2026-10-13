@@ -4,9 +4,10 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FIXES, buildExport, changelogSection, commitToPublicRepo, git, npmTag, scanForLeaks, shippable, validVersion, walk } from "../release/lib.ts";
+import { FIXES, buildExport, publicCatalog, publicRuleIds, changelogSection, commitToPublicRepo, git, npmTag, scanForLeaks, shippable, validVersion, walk } from "../release/lib.ts";
 
 const root = join(import.meta.dirname, "..");
+const CATALOG = "packages/spec/src/rules.ts";
 let bad = 0;
 const check = (ok: boolean, msg: string) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) bad++; };
 const throws = (fn: () => unknown, re: RegExp) => { try { fn(); return false; } catch (e) { return re.test((e as Error).message); } };
@@ -29,6 +30,11 @@ try {
     writeFileSync(join(d, "note.md"), `hello\n${text}\n`);
     check(scanForLeaks(d).length === 1, `scan catches ${what}`);
   }
+  // A shipped file citing a rule that is not in the public catalog points at the private spec.
+  const refDir = join(tmp, "refs"); mkdirSync(join(refDir, "packages/spec/src"), { recursive: true });
+  writeFileSync(join(refDir, CATALOG), 'seeds\n    id: "TENANT-1",\n');
+  writeFileSync(join(refDir, "a.ts"), "// ok TENANT-1\n// private VERIFY-4\n");
+  check(scanForLeaks(refDir).length === 1 && /VERIFY-4/.test(scanForLeaks(refDir)[0] as string), "scan catches a citation of a rule that is not in the public catalog");
   const clean = join(tmp, "clean"); mkdirSync(clean);
   writeFileSync(join(clean, "a.md"), "A package called @kalahroudi/bulkhead-core, fixture DR-9999, https://github.com/flamingosh/bulkhead\n");
   check(scanForLeaks(clean).length === 0, "scan passes a clean tree (public scope, fixture ids and the public URL are allowed)");
@@ -51,6 +57,13 @@ try {
   const rootManifest = JSON.parse(readFileSync(join(out, "package.json"), "utf8"));
   check(!JSON.stringify(rootManifest.scripts).match(/phase|mutation|catalog|decision/) && "gate:release" in rootManifest.scripts, "export root scripts reference no private gates");
   check(!JSON.stringify(JSON.parse(readFileSync(join(out, "packages/spec/package.json"), "utf8")).scripts).match(/catalog|decisions/), "export spec scripts reference no SPEC.md or decision lint");
+
+  // The public catalog holds product guarantees only.
+  const rulesText = readFileSync(join(out, CATALOG), "utf8");
+  const ids = [...publicRuleIds(rulesText)];
+  check(ids.length > 20 && ids.every((i) => /^(TENANT|ROUTE|AUTH|CRYPTO|BOOT|BILL|DOMAIN|HTTP|LIFE)-/.test(i)) && !ids.includes("ROUTE-3"), `public catalog has only product-guarantee rules (${ids.length} of the private catalog)`);
+  check(!/development plane|attestation|harness|human key|keychain|ledger/i.test(rulesText), "public catalog text has no internal process wording");
+  check(throws(() => publicCatalog("no markers here"), /layout changed/), "a restructured catalog aborts the export instead of leaking");
 
   // 5. A stale text fix aborts the export instead of being skipped.
   FIXES.push({ file: "packages/core/src/api/app.ts", find: "this text is not in the file", replace: "x" });
