@@ -1,6 +1,6 @@
 # DR-0007: Automate mutation checks as the first item of Phase 4
 
-- Status: proposed (owner acceptance and signature pending; the builder cannot accept its own record)
+- Status: accepted (owner approved in session on 2026-10-13; cryptographic signature pending)
 - Date: 2026-10-12
 - Rules: VERIFY-4 (and, through it, every rule with a probe)
 
@@ -31,7 +31,7 @@ Make mutation checking part of the gate, and do it before any Phase 4 feature wo
    fails otherwise, so a recorded decision cannot silently drift from the code (the CSRF fallback case). Check: `test:packages/spec/test/decisions.test.ts::a choice with neither Check nor No check fails`, `test:packages/verify/test/decisions.test.ts::every ref`.
 
 Edits touch `packages/verify/` (catalog, runner) and `packages/spec/` (DR lint), both frozen, so they
-need this record accepted first and a separate attacker session to review the catalog.
+need this record accepted first and a separate attacker session to review the catalog. Both happened; see DR-0009.
 
 ## Consequences
 - Gate time grows by one workerd boot per mutation batch; mutations that hit unrelated probes can share

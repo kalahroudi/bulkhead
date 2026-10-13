@@ -1,6 +1,6 @@
 # DR-0008: Interim mutation runner outside frozen paths
 
-- Status: proposed (owner acceptance pending; the builder cannot accept its own record)
+- Status: accepted (owner approved in session on 2026-10-13; cryptographic signature pending). Superseded by DR-0009 for the catalog location; the runner design stands.
 - Date: 2026-10-13
 - Rules: VERIFY-4
 
