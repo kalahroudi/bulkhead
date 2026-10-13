@@ -129,6 +129,12 @@ export const mutations: Mutation[] = [
     expect: ["identity-header-differential"],
   },
   {
+    id: "tenant-from-forwarded-host", rule: "TENANT-1", file: "packages/core/src/api/app.ts",
+    find: "await resolveTenant(new URL(c.req.url).hostname, cfg);",
+    replace: 'await resolveTenant(c.req.header("x-forwarded-host") ?? new URL(c.req.url).hostname, cfg);',
+    expect: ["identity-header-differential"],
+  },
+  {
     id: "tenants-share-one-object-and-binding-removed", rule: "TENANT-5", file: "packages/core/src/tenant/handle.ts",
     find: "const stub = ns.get(ns.idFromName(tenant.id));",
     replace: 'const stub = ns.get(ns.idFromName("shared"));',
@@ -138,9 +144,13 @@ export const mutations: Mutation[] = [
       { file: "packages/core/src/tenant/store.ts", find: 'else if (bound !== tenantId) throw new Error("tenant mismatch");', replace: "" },
       { file: "packages/core/src/tenant/store.ts", find: 'else if (this.exec("select value from _bulkhead_meta where key = \'tenant_id\'", []).rows[0]?.value !== tenantId) throw new Error("tenant mismatch");', replace: "" },
     ],
+    // The probes that bootstrap or sign in on a throwaway tenant (ownerTenant, bootstrap-*) also fail: with one shared database
+    // the "fresh" tenant is already claimed, so setup (a 409 on bootstrap) cannot succeed. Legitimate, like the older entries.
     expect: [
-      "add-tenant-metamorphic", "api-key-scope", "authority-matrix", "cache-canary", "cookie-flags", "cross-tenant-session",
-      "csrf-origin", "disabled-user-denied", "key-revocation", "logout-revokes", "notes-list-canary", "role-change-revokes", "role-matrix",
+      "add-tenant-metamorphic", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "bootstrap-token-required", "cache-canary",
+      "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling",
+      "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "notes-list-canary", "role-change-authority",
+      "role-change-revokes", "role-matrix", "unknown-email-login-same-answer",
     ],
   },
   {
@@ -174,55 +184,55 @@ export const mutations: Mutation[] = [
     replace: "where k.id = ? and (k.expires_at is null or k.expires_at > ?)",
     expect: ["key-revocation"],
   },
+  {
+    id: "unknown-user-dummy-at-module-scope", rule: "AUTH-2", file: "packages/auth/src/secrets.ts",
+    // Stand-in for the module-scope DUMMY bug: the unknown-user path throws, so login answers 500 for unknown emails only.
+    find: '(stored ?? DUMMY_HASH).split("$")',
+    replace: '(stored ?? (() => { throw new Error("no dummy hash"); })()).split("$")',
+    expect: ["unknown-email-login-same-answer"],
+  },
   // Lines found unprotected by the attacker pass (DR-0009): no black-box probe reaches them yet, so each is a named gap
-  // that the auth unit tests must kill. The probes that would close them are listed as owed in DR-0009.
+  // that the auth unit tests must kill. Those owed in DR-0009 have since been promoted to probes (the attacker session that built them).
   {
     id: "key-secret-not-compared", rule: "AUTH-4", file: AUTH,
     find: "if (!row || !ok || row.user_disabled",
     replace: "if (!row || row.user_disabled",
-    expect: [],
-    gap: "no probe presents a real key id with a wrong secret (no-default-role uses an unknown id); covered by auth unit tests only",
+    expect: ["key-wrong-secret-denied"],
   },
   {
     id: "bootstrap-token-unchecked", rule: "AUTH-1", file: ROUTES,
     find: "|| !safeEqual(b.token, secret)) return c.json({ error: \"forbidden\" }, 403);",
     replace: ") return c.json({ error: \"forbidden\" }, 403);",
-    expect: [],
-    gap: "no probe sends a wrong or missing bootstrap token; covered by auth unit tests only",
+    expect: ["bootstrap-token-required"],
   },
   {
     id: "bootstrap-allows-second-owner", rule: "AUTH-1", file: ROUTES,
     find: ", ? where not exists (select 1 from users)\"",
     replace: ", ? \"",
-    expect: [],
-    gap: "probes bootstrap each tenant exactly once, never a second claim; covered by auth unit tests only",
+    expect: ["bootstrap-claims-once"],
   },
   {
     id: "role-patch-above-own-role", rule: "AUTH-3", file: ROUTES,
     find: "    if (rank(b.role) > rank(c.user!.role)) return c.json({ error: \"cannot grant a role above your own\" }, 403);\n    const refused = await guardTarget(c, id, b.role !== \"owner\");",
     replace: "    const refused = await guardTarget(c, id, b.role !== \"owner\");",
-    expect: [],
-    gap: "authority-matrix exercises POST /users but not PATCH /users/:id/role; covered by auth unit tests only",
+    expect: ["role-change-authority"],
   },
   {
     id: "guard-target-above-own-role", rule: "AUTH-3", file: ROUTES,
     find: "if (rank(target.role) > rank(c.user!.role)) return c.json({ error: \"cannot modify a user above your own role\" }, 403);",
     replace: "",
-    expect: [],
-    gap: "no probe has an admin modify or disable an owner; covered by auth unit tests only",
+    expect: ["role-change-authority"],
   },
   {
     id: "key-minted-above-own-role", rule: "AUTH-4", file: ROUTES,
     find: "if (rank(role) > rank(c.user!.role)) return c.json({ error: \"cannot mint a key above your own role\" }, 403);",
     replace: "",
-    expect: [],
-    gap: "api-key-scope mints as owner, so the role ceiling is never tested black-box; covered by auth unit tests only",
+    expect: ["key-role-ceiling"],
   },
   {
     id: "user-list-leaks-password-hash", rule: "AUTH-4", file: ROUTES,
     find: "select id, email, role, disabled, created_at from users order by created_at, id",
     replace: "select id, email, role, disabled, created_at, password_hash from users order by created_at, id",
-    expect: [],
-    gap: "no probe scans listings for hash material; covered by auth unit tests only",
+    expect: ["listings-hide-secrets"],
   },
 ];

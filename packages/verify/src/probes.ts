@@ -137,14 +137,29 @@ export const probes: Probe[] = [
     scenario: "tenant-isolation/identity-from-host-or-session-only",
     oracle: "differential",
     async run({ req, host }) {
-      const reproduction = `GET /whoami with Host: ${host("ident-b")} twice, the second time adding header x-tenant: ident-a. Responses must be identical.`;
+      const reproduction = `GET /whoami with Host: ${host("ident-b")}, then repeat it once per extra input naming tenant ident-a: headers x-tenant, x-tenant-id, x-forwarded-host, x-original-host, x-host, forwarded: host=${host("ident-a")}, and a ?tenant=ident-a query. Every response must be identical to the plain one.`;
       const plain = await req(host("ident-b"), "GET", "/whoami");
       const brokenPlain = requireSetup(plain, "GET /whoami as tenant B", reproduction);
       if (brokenPlain) return brokenPlain;
-      const spoofed = await req(host("ident-b"), "GET", "/whoami", { headers: { "x-tenant": "ident-a" } });
-      const brokenSpoofed = requireSetup(spoofed, "GET /whoami with a spoofed tenant header", reproduction);
-      if (brokenSpoofed) return brokenSpoofed;
-      return { ...differentialOracle(plain, spoofed, "GET /whoami with and without a client-supplied tenant header"), reproduction };
+      const a = host("ident-a");
+      const variants: { name: string; path: string; headers: Record<string, string> }[] = [
+        { name: "x-tenant", path: "/whoami", headers: { "x-tenant": "ident-a" } },
+        { name: "x-tenant-id", path: "/whoami", headers: { "x-tenant-id": "ident-a" } },
+        { name: "x-forwarded-host", path: "/whoami", headers: { "x-forwarded-host": a } },
+        { name: "x-original-host", path: "/whoami", headers: { "x-original-host": a } },
+        { name: "x-host", path: "/whoami", headers: { "x-host": a } },
+        { name: "forwarded", path: "/whoami", headers: { forwarded: `host=${a}` } },
+        { name: "?tenant= query", path: "/whoami?tenant=ident-a", headers: {} },
+      ];
+      const checks: { name: string; ok: boolean; detail: string }[] = [];
+      for (const v of variants) {
+        const r = await req(host("ident-b"), "GET", v.path, { headers: v.headers });
+        const brokenRead = requireSetup(r, `GET /whoami with ${v.name}`, reproduction);
+        if (brokenRead) return brokenRead;
+        const d = differentialOracle(plain, r, `GET /whoami with and without ${v.name}`);
+        checks.push({ name: `${v.name} changes nothing`, ok: d.passed, detail: d.evidence });
+      }
+      return { ...specOracle(checks), reproduction };
     },
   },
   {
@@ -522,6 +537,242 @@ export const probes: Probe[] = [
           { name: "old session is dead after disabling", ok: oldSession.status === 401, detail: `HTTP ${oldSession.status}` },
           { name: "wrong password is refused with 401 (baseline)", ok: wrong.status === 401, detail: `HTTP ${wrong.status} ${wrong.body}` },
           { name: "disabled user's correct password is refused with the same 401 and body as a wrong password", ok: relogin.status === 401 && relogin.status === wrong.status && relogin.body === wrong.body && !sessionOf(relogin), detail: `HTTP ${relogin.status} ${relogin.body} vs wrong password HTTP ${wrong.status} ${wrong.body}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "key-wrong-secret-denied",
+    ruleId: "AUTH-4",
+    scenario: "auth/api-key-scope",
+    oracle: "spec",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "As owner, mint a member key with private:read. The real key reaches /private/member. Then present 'Bearer bkk_<real id>_<43 wrong base64url chars>' (a random secret, and the real secret with its last character changed): each must be 401, identical to a key with an unknown id.";
+      const t = await ownerTenant(ctx, "keysecret", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token } = t as Extract<typeof t, { h: string }>;
+      const made = await req(h, "POST", "/api-keys", { ...cookieWrite(h, token), body: json({ name: "probe", role: "member", permissions: ["private:read"] }) });
+      const broken = requireSetup(made, "minting a key", reproduction);
+      if (broken) return broken;
+      const { id, key } = JSON.parse(made.body) as { id: string; key: string };
+      const bearer = (k: string) => ({ headers: { authorization: `Bearer ${k}` } });
+      const real = await req(h, "GET", "/private/member", bearer(key));
+      const brokenReal = requireSetup(real, "presenting the real key", reproduction);
+      if (brokenReal) return brokenReal;
+      const secret = key.slice("bkk_".length + 16 + 1);
+      const flipped = `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`;
+      const wrongRandom = await req(h, "GET", "/private/member", bearer(`bkk_${id}_${randomBytes(32).toString("base64url")}`));
+      const wrongLast = await req(h, "GET", "/private/member", bearer(`bkk_${id}_${flipped}`));
+      const unknown = await req(h, "GET", "/private/member", bearer(`bkk_${randomBytes(8).toString("hex")}_${randomBytes(32).toString("base64url")}`));
+      const same = (r: Response, label: string) => differentialOracle(unknown, r, label);
+      return {
+        ...specOracle([
+          { name: "unknown key id is refused (baseline)", ok: unknown.status === 401, detail: `HTTP ${unknown.status} ${unknown.body}` },
+          { name: "real id with a random wrong secret is refused with 401", ok: wrongRandom.status === 401, detail: `HTTP ${wrongRandom.status} ${wrongRandom.body}` },
+          { name: "real id with the real secret's last character changed is refused with 401", ok: wrongLast.status === 401, detail: `HTTP ${wrongLast.status} ${wrongLast.body}` },
+          { name: "wrong secret answers exactly like an unknown id", ok: same(wrongRandom, "random wrong secret").passed && same(wrongLast, "near-miss secret").passed, detail: `${same(wrongRandom, "random wrong secret").evidence}; ${same(wrongLast, "near-miss secret").evidence}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "bootstrap-token-required",
+    ruleId: "AUTH-1",
+    scenario: "auth/no-default-role",
+    oracle: "differential",
+    async run({ req, host, bootstrapToken }) {
+      const reproduction = "On a fresh empty tenant, POST /auth/bootstrap with a wrong token, a near-miss token (the real one with its last character changed) and no token: each must be 403 and create no user. Then the correct token (same email) must still return 201, proving the wrong attempts did not claim the tenant.";
+      if (!bootstrapToken) return fail("no bootstrap token configured for this target (set BULKHEAD_VERIFY_BOOTSTRAP_TOKEN); auth probes cannot run", reproduction);
+      const h = host(`boot-${randomBytes(3).toString("hex")}`);
+      const squatter = { email: "squatter@probe.test", password: PASSWORD };
+      const nearMiss = `${bootstrapToken.slice(0, -1)}${bootstrapToken.endsWith("0") ? "1" : "0"}`;
+      const wrong = await req(h, "POST", "/auth/bootstrap", { body: json({ ...squatter, token: `wrong-${randomBytes(16).toString("hex")}` }) });
+      const near = await req(h, "POST", "/auth/bootstrap", { body: json({ ...squatter, token: nearMiss }) });
+      const none = await req(h, "POST", "/auth/bootstrap", { body: json(squatter) });
+      // Same email as the refused attempts: if any of them had created the user, this would be a 409, not a 201.
+      const real = await req(h, "POST", "/auth/bootstrap", { body: json({ ...squatter, token: bootstrapToken }) });
+      return {
+        ...specOracle([
+          { name: "wrong token is refused with 403", ok: wrong.status === 403, detail: `HTTP ${wrong.status} ${wrong.body}` },
+          { name: "near-miss token is refused with 403", ok: near.status === 403, detail: `HTTP ${near.status} ${near.body}` },
+          { name: "missing token is refused with 403", ok: none.status === 403, detail: `HTTP ${none.status} ${none.body}` },
+          { name: "the correct token still claims the tenant afterwards, so no refused attempt created a user", ok: real.status === 201, detail: `HTTP ${real.status} ${real.body}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "bootstrap-claims-once",
+    ruleId: "AUTH-1",
+    scenario: "auth/no-default-role",
+    oracle: "differential",
+    async run(ctx) {
+      const { req, bootstrapToken } = ctx;
+      const reproduction = "Bootstrap an owner on a fresh tenant. POST /auth/bootstrap again with the CORRECT token and another email: it must be 409, the first owner's session must still be owner, and GET /users must list exactly one owner and one user.";
+      const t = await ownerTenant(ctx, "claimonce", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token } = t as Extract<typeof t, { h: string }>;
+      const second = await req(h, "POST", "/auth/bootstrap", { body: json({ token: bootstrapToken, email: "second-owner@probe.test", password: PASSWORD }) });
+      const stillOwner = await req(h, "GET", "/private/owner", withCookie(token));
+      const listing = await req(h, "GET", "/users", withCookie(token));
+      const brokenList = requireSetup(listing, "listing users as the first owner", reproduction);
+      if (brokenList) return brokenList;
+      const users = (JSON.parse(listing.body) as { users: { role: string }[] }).users;
+      return {
+        ...specOracle([
+          { name: "a second bootstrap with the correct token is refused with 409", ok: second.status === 409, detail: `HTTP ${second.status} ${second.body}` },
+          { name: "the first owner's session still has the owner role", ok: stillOwner.status === 200, detail: `HTTP ${stillOwner.status}` },
+          { name: "GET /users lists exactly one owner", ok: users.filter((u) => u.role === "owner").length === 1, detail: `${users.filter((u) => u.role === "owner").length} owner(s)` },
+          { name: "GET /users lists exactly one user", ok: users.length === 1, detail: `${users.length} user(s)` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "role-change-authority",
+    ruleId: "AUTH-3",
+    scenario: "auth/role-differential",
+    oracle: "differential",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "Create a second owner (so 'last owner' protection cannot mask anything) and an admin. As the admin: PATCH /users/<admin id>/role {role:owner}, PATCH /users/<first owner id>/role {role:member} and DELETE /users/<first owner id> must each be 403. Afterwards the first owner is still an enabled owner and the admin is still an admin.";
+      const t = await ownerTenant(ctx, "roleauth", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token, addUser, loginAs } = t as Extract<typeof t, { h: string }>;
+      const owner2 = await addUser("owner2@probe.test", "owner");
+      if ("error" in owner2) return owner2.error!;
+      const added = await addUser("climber@probe.test", "admin");
+      if ("error" in added) return added.error!;
+      const admin = await loginAs("climber@probe.test");
+      if ("error" in admin) return admin.error!;
+      type Listed = { id: string; email: string; role: string; disabled?: number };
+      const list = async () => {
+        const r = await req(h, "GET", "/users", withCookie(token));
+        const broken = requireSetup(r, "listing users as the owner", reproduction);
+        return broken ? { error: broken } : { users: (JSON.parse(r.body) as { users: Listed[] }).users };
+      };
+      const before = await list();
+      if ("error" in before) return before.error!;
+      const owner = before.users.find((u) => u.email === "owner@probe.test");
+      if (!owner || owner.role !== "owner") return fail("setup: the first owner is not listed with role owner", reproduction);
+
+      const selfUp = await req(h, "PATCH", `/users/${added.id}/role`, { ...cookieWrite(h, admin.token), body: json({ role: "owner" }) });
+      const demoteOwner = await req(h, "PATCH", `/users/${owner.id}/role`, { ...cookieWrite(h, admin.token), body: json({ role: "member" }) });
+      const removeOwner = await req(h, "DELETE", `/users/${owner.id}`, cookieWrite(h, admin.token));
+
+      const after = await list();
+      if ("error" in after) return after.error!;
+      const ownerAfter = after.users.find((u) => u.id === owner.id);
+      const adminAfter = after.users.find((u) => u.id === added.id);
+      const ownerRoute = await req(h, "GET", "/private/owner", withCookie(token));
+      return {
+        ...specOracle([
+          { name: "admin cannot PATCH their own role to owner", ok: selfUp.status === 403, detail: `HTTP ${selfUp.status} ${selfUp.body}` },
+          { name: "admin cannot PATCH the owner's role", ok: demoteOwner.status === 403, detail: `HTTP ${demoteOwner.status} ${demoteOwner.body}` },
+          { name: "admin cannot DELETE the owner", ok: removeOwner.status === 403, detail: `HTTP ${removeOwner.status} ${removeOwner.body}` },
+          { name: "the owner is still an enabled owner", ok: ownerAfter?.role === "owner" && !ownerAfter.disabled, detail: JSON.stringify(ownerAfter) },
+          { name: "the owner's session still reaches the owner route", ok: ownerRoute.status === 200, detail: `HTTP ${ownerRoute.status}` },
+          { name: "the admin is still an admin", ok: adminAfter?.role === "admin", detail: JSON.stringify(adminAfter) },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "key-role-ceiling",
+    ruleId: "AUTH-4",
+    scenario: "auth/api-key-scope",
+    oracle: "spec",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "As an admin, POST /api-keys {role:owner, permissions:[private:read]} must be 403 and no owner-role key may appear in GET /api-keys. An admin-role key minted by the same admin must be 201 and reach /private/admin.";
+      const t = await ownerTenant(ctx, "keyceil", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token, addUser, loginAs } = t as Extract<typeof t, { h: string }>;
+      const added = await addUser("minter@probe.test", "admin");
+      if ("error" in added) return added.error!;
+      const admin = await loginAs("minter@probe.test");
+      if ("error" in admin) return admin.error!;
+      const above = await req(h, "POST", "/api-keys", { ...cookieWrite(h, admin.token), body: json({ name: "probe-owner", role: "owner", permissions: ["private:read"] }) });
+      const own = await req(h, "POST", "/api-keys", { ...cookieWrite(h, admin.token), body: json({ name: "probe-admin", role: "admin", permissions: ["private:admin"] }) });
+      const brokenOwn = requireSetup(own, "the admin minting an admin-role key", reproduction);
+      if (brokenOwn) return brokenOwn;
+      const ownWorks = await req(h, "GET", "/private/admin", { headers: { authorization: `Bearer ${(JSON.parse(own.body) as { key: string }).key}` } });
+      const listing = await req(h, "GET", "/api-keys", withCookie(token));
+      const brokenList = requireSetup(listing, "listing API keys as the owner", reproduction);
+      if (brokenList) return brokenList;
+      const roles = (JSON.parse(listing.body) as { keys: { role: string }[] }).keys.map((k) => k.role);
+      return {
+        ...specOracle([
+          { name: "an admin cannot mint an owner-role key (403)", ok: above.status === 403, detail: `HTTP ${above.status} ${above.body.replace(/bkk_\S+/g, "bkk_<redacted>")}` },
+          { name: "no owner-role key exists afterwards", ok: !roles.includes("owner"), detail: `key roles: ${roles.join(", ")}` },
+          { name: "an admin-role key minted by the admin works on /private/admin", ok: ownWorks.status === 200, detail: `HTTP ${ownWorks.status}` },
+        ]),
+        reproduction,
+      };
+    },
+  },
+  {
+    id: "listings-hide-secrets",
+    ruleId: "AUTH-4",
+    scenario: "auth/api-key-scope",
+    oracle: "spec",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "As owner, create an admin and mint two keys. GET /users and GET /api-keys must be 200 and contain none of: pbkdf2, password_hash, secret_hash, password, or either minted key's secret.";
+      const t = await ownerTenant(ctx, "listing", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token, addUser } = t as Extract<typeof t, { h: string }>;
+      const added = await addUser("listed@probe.test", "admin");
+      if ("error" in added) return added.error!;
+      const secrets: string[] = [];
+      for (const name of ["probe-1", "probe-2"]) {
+        const made = await req(h, "POST", "/api-keys", { ...cookieWrite(h, token), body: json({ name, role: "member", permissions: ["private:read"] }) });
+        const broken = requireSetup(made, `minting key ${name}`, reproduction);
+        if (broken) return broken;
+        secrets.push((JSON.parse(made.body) as { key: string }).key.slice("bkk_".length + 16 + 1));
+      }
+      const users = await req(h, "GET", "/users", withCookie(token));
+      const brokenUsers = requireSetup(users, "GET /users as the owner (a 4xx would read as 'nothing leaked')", reproduction);
+      if (brokenUsers) return brokenUsers;
+      const keysList = await req(h, "GET", "/api-keys", withCookie(token));
+      const brokenKeys = requireSetup(keysList, "GET /api-keys as the owner (a 4xx would read as 'nothing leaked')", reproduction);
+      if (brokenKeys) return brokenKeys;
+      const needles = ["pbkdf2", "password_hash", "secret_hash", "password"];
+      const checks = [{ where: "GET /users", res: users }, { where: "GET /api-keys", res: keysList }].flatMap(({ where, res }) => {
+        const body = res.body.toLowerCase();
+        return [
+          ...needles.map((n) => ({ name: `${where} has no '${n}'`, ok: !body.includes(n), detail: "found in the response body" })),
+          ...secrets.map((s, i) => ({ name: `${where} does not contain minted key secret #${i + 1}`, ok: !res.body.includes(s), detail: "the secret reappears in a listing" })),
+        ];
+      });
+      return { ...specOracle(checks), reproduction };
+    },
+  },
+  {
+    id: "unknown-email-login-same-answer",
+    ruleId: "AUTH-2",
+    scenario: "session/rotation-revocation-and-cookie-flags",
+    oracle: "state",
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "On a tenant with an owner, POST /auth/login for an unknown email and for the owner's email with a wrong password. Both must be 401 with byte-identical bodies and set no session cookie.";
+      const t = await ownerTenant(ctx, "unknownlogin", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h } = t as Extract<typeof t, { h: string }>;
+      const wrong = await req(h, "POST", "/auth/login", { body: json({ email: "owner@probe.test", password: `${PASSWORD}-wrong` }) });
+      const unknown = await req(h, "POST", "/auth/login", { body: json({ email: `nobody-${randomBytes(3).toString("hex")}@probe.test`, password: PASSWORD }) });
+      return {
+        ...specOracle([
+          { name: "wrong password is refused with 401 (baseline)", ok: wrong.status === 401, detail: `HTTP ${wrong.status} ${wrong.body}` },
+          { name: "unknown email is refused with 401 (a 5xx must not read as a pass)", ok: unknown.status === 401, detail: `HTTP ${unknown.status} ${unknown.body}` },
+          { name: "unknown email's body is byte-identical to the wrong-password body", ok: unknown.body === wrong.body, detail: `${unknown.body} vs ${wrong.body}` },
+          { name: "neither sets a session cookie", ok: !sessionOf(wrong) && !sessionOf(unknown), detail: "a session cookie was set" },
         ]),
         reproduction,
       };

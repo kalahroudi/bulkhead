@@ -1,11 +1,12 @@
 // Deliberately vulnerable fixture app. Never deploy. Bugs are toggled by FIXTURE_BUGS (comma list, or "all"/"none").
 import { createServer } from "node:http";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 const ALL = [
   "missing-tenant-filter", "shared-cache-key", "skipped-signature-check", "tenant-from-header",
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
   "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
+  "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -31,8 +32,8 @@ const notes: { tenant: string; text: string }[] = [];
 const plans = new Map<string, string>();
 const cache = new Map<string, string>();
 
-function tenantOf(host: string | undefined, header: string | undefined): string | null {
-  const m = /^([a-z0-9-]+)\.demo\.localhost(:\d+)?$/.exec(host ?? "");
+function tenantOf(host: string | undefined, header: string | undefined, forwardedHost?: string): string | null {
+  const m = /^([a-z0-9-]+)\.demo\.localhost(:\d+)?$/.exec((bugs.has("tenant-from-forwarded-host") && forwardedHost ? forwardedHost : host) ?? "");
   if (bugs.has("tenant-from-header") && header) return header;
   return m ? (m[1] as string) : null; // unknown host: fail closed
 }
@@ -61,7 +62,7 @@ function principal(tenant: string, headers: Record<string, string | string[] | u
   if (authz) {
     const m = /^Bearer bkk_([0-9a-f]{16})_(\S+)$/.exec(authz);
     const k = m && keys.get(m[1] as string);
-    if (!k || k.secret !== m[2]) return null;
+    if (!k || (k.secret !== m[2] && !bugs.has("key-secret-unchecked"))) return null;
     if (k.revoked && !bugs.has("key-revocation-ignored")) return null;
     if (k.tenant !== tenant && !bugs.has("api-key-cross-tenant")) return null;
     return { role: k.role, perms: k.permissions, id: `key:${m[1]}` };
@@ -87,8 +88,8 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
   }
   if (method === "POST" && path === "/auth/bootstrap") {
     const b = json();
-    if (b.token !== BOOTSTRAP) return reply(403, { error: "forbidden" });
-    if (tenantUsers(tenant).length) return reply(409, { error: "tenant already has users" });
+    if (typeof b.token !== "string" || (b.token !== BOOTSTRAP && !bugs.has("bootstrap-token-unchecked"))) return reply(403, { error: "forbidden" });
+    if (tenantUsers(tenant).length && !bugs.has("bootstrap-second-owner")) return reply(409, { error: "tenant already has users" });
     const u = { id: token(8), email: String(b.email), password: String(b.password), role: "owner" as Role, disabled: false };
     users.set(`${tenant}|${u.email}`, u);
     return reply(201, { id: u.id, role: "owner" });
@@ -96,6 +97,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
   if (method === "POST" && path === "/auth/login") {
     const b = json();
     const u = users.get(`${tenant}|${b.email}`);
+    if (!u && bugs.has("unknown-email-login-errors")) return reply(500, { error: "internal error" });
     if (!u || u.password !== b.password || (u.disabled && !bugs.has("disabled-user-can-login"))) return reply(401, { error: "invalid credentials" });
     const presented = cookieOf(String(headers.cookie ?? ""));
     if (presented && !bugs.has("session-fixation")) sessions.delete(presented);
@@ -114,7 +116,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
     if (RANK[p.role] < (bugs.has("member-can-list-users") ? RANK.member : RANK.admin)) return reply(403, { error: "forbidden" });
-    return reply(200, { users: tenantUsers(tenant).map((u) => ({ id: u.id, email: u.email, role: u.role })) });
+    return reply(200, { users: tenantUsers(tenant).map((u) => ({ id: u.id, email: u.email, role: u.role, disabled: u.disabled ? 1 : 0, ...(bugs.has("listing-leaks-hash") ? { password_hash: `pbkdf2$100000$${token(8)}$${token(32)}` } : {}) })) });
   }
   if (method === "POST" && path === "/users") {
     const p = principal(tenant, headers);
@@ -132,9 +134,14 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
     if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    const wanted = String(json().role) as Role;
+    if (!(wanted in RANK)) return reply(400, { error: "role must be member, admin or owner" });
+    if (!bugs.has("role-patch-escalation") && RANK[wanted] > RANK[p.role]) return reply(403, { error: "cannot grant a role above your own" });
     const u = tenantUsers(tenant).find((x) => x.id === rolePath[1]);
     if (!u) return reply(404, { error: "not found" });
-    u.role = String(json().role) as Role;
+    if (!bugs.has("admin-modifies-owner") && RANK[u.role] > RANK[p.role]) return reply(403, { error: "cannot modify a user above your own role" });
+    if (u.role === "owner" && wanted !== "owner" && !u.disabled && tenantUsers(tenant).filter((x) => x.role === "owner" && !x.disabled).length <= 1) return reply(409, { error: "cannot remove the last owner" });
+    u.role = wanted;
     if (!bugs.has("role-change-keeps-session")) for (const [k, s] of sessions) if (s.userId === u.id) sessions.delete(k);
     if (!bugs.has("key-revocation-ignored")) for (const [, k] of keys) if (k.createdBy === u.id) k.revoked = true;
     return reply(200, { id: u.id, role: u.role });
@@ -146,7 +153,8 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
     const u = tenantUsers(tenant).find((x) => x.id === userPath[1]);
     if (!u) return reply(404, { error: "not found" });
-    if (RANK[u.role] > RANK[p.role]) return reply(403, { error: "cannot modify a user above your own role" });
+    if (!bugs.has("admin-modifies-owner") && RANK[u.role] > RANK[p.role]) return reply(403, { error: "cannot modify a user above your own role" });
+    if (u.role === "owner" && !u.disabled && tenantUsers(tenant).filter((x) => x.role === "owner" && !x.disabled).length <= 1) return reply(409, { error: "cannot remove the last owner" });
     u.disabled = true;
     for (const [k, s] of sessions) if (s.userId === u.id) sessions.delete(k);
     for (const [, k] of keys) if (k.createdBy === u.id) k.revoked = true;
@@ -157,9 +165,12 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     if (!p) return reply(401, { error: "authentication required" });
     if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
     const b = json();
+    const role = (b.role as Role | undefined) ?? "member";
+    if (!(role in RANK)) return reply(400, { error: "role must be member, admin or owner" });
+    if (!bugs.has("key-above-minter-role") && RANK[role] > RANK[p.role]) return reply(403, { error: "cannot mint a key above your own role" });
     const id = randomBytes(8).toString("hex");
     const secret = token(32);
-    keys.set(id, { tenant, secret, role: (b.role as Role) ?? "member", permissions: (b.permissions as string[]) ?? [], createdBy: p.id, revoked: false });
+    keys.set(id, { tenant, secret, role, permissions: (b.permissions as string[]) ?? [], createdBy: p.id, revoked: false });
     return reply(201, { id, key: `bkk_${id}_${secret}` });
   }
   const keyPath = /^\/api-keys\/([^/]+)$/.exec(path);
@@ -176,7 +187,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const p = principal(tenant, headers);
     if (!p) return reply(401, { error: "authentication required" });
     if (RANK[p.role] < (bugs.has("member-can-list-users") ? RANK.member : RANK.admin)) return reply(403, { error: "forbidden" });
-    return reply(200, { keys: [...keys].filter(([, k]) => k.tenant === tenant).map(([id, k]) => ({ id, role: k.role, permissions: k.permissions })) });
+    return reply(200, { keys: [...keys].filter(([, k]) => k.tenant === tenant).map(([id, k]) => ({ id, role: k.role, permissions: k.permissions, ...(bugs.has("listing-leaks-hash") ? { secret_hash: createHash("sha256").update(k.secret).digest("hex") } : {}) })) });
   }
   return null;
 }
@@ -190,7 +201,7 @@ const server = createServer((req, res) => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(obj));
     };
-    const tenant = tenantOf(req.headers.host, req.headers["x-tenant"] as string | undefined);
+    const tenant = tenantOf(req.headers.host, req.headers["x-tenant"] as string | undefined, req.headers["x-forwarded-host"] as string | undefined);
     if (!tenant) return send(404, { error: "unknown host" });
     const url = new URL(req.url ?? "/", "http://x");
     const mine = () => notes.filter((n) => n.tenant === tenant).map((n) => n.text);
