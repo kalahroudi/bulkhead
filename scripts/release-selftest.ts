@@ -40,7 +40,7 @@ try {
   writeFileSync(join(refDir, "a.ts"), "// ok TENANT-1\n// private VERIFY-4\n");
   check(scanForLeaks(refDir).length === 1 && /VERIFY-4/.test(scanForLeaks(refDir)[0] as string), "scan catches a citation of a rule that is not in the public catalog");
   const clean = join(tmp, "clean"); mkdirSync(clean);
-  writeFileSync(join(clean, "a.md"), "A package called @kalahroudi/bulkhead-core, fixture DR-9999, https://github.com/flamingosh/bulkhead\n");
+  writeFileSync(join(clean, "a.md"), "A package called @kalahroudi/bulkhead-core, fixture DR-9999, https://github.com/kalahroudi/bulkhead-oss\n");
   check(scanForLeaks(clean).length === 0, "scan passes a clean tree (public scope, fixture ids and the public URL are allowed)");
 
   // 3. Versions, dist-tags, identity, redaction and changelog.
@@ -62,7 +62,11 @@ try {
   check(["README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "site/index.html", ".github/workflows/ci.yml", ".github/workflows/pages.yml", "packages/core/src/api/app.ts", "examples/demo-app/src/routes.ts", "pnpm-lock.yaml"].every((f) => files.includes(f)), "export has the public files (README, CHANGELOG, site, workflows, packages, demo, lockfile)");
   check(!files.some((f) => /^(SPEC\.md|CLAUDE\.md|AGENTS\.md|FROZEN_PATHS|CODEOWNERS)$|^docs\/|^release\/|^scripts\/(release|verify-mutations|mutation)|mutations\.ts$/.test(f)), "export has no private docs, records, specs, release tooling or mutation catalog");
   const coreManifest = JSON.parse(readFileSync(join(out, "packages/core/package.json"), "utf8"));
-  check(coreManifest.version === "9.8.7-preview.3" && coreManifest.repository.url.includes("flamingosh/bulkhead") && coreManifest.bugs.url.includes("flamingosh"), "export sets the release version and the public URLs");
+  check(coreManifest.version === "9.8.7-preview.3" && coreManifest.repository.url === "git+https://github.com/kalahroudi/bulkhead-oss.git" && coreManifest.bugs.url === "https://github.com/kalahroudi/bulkhead-oss/issues" && !JSON.stringify(coreManifest).includes("bulkhead-oss-oss"), "export sets the release version and the public URLs");
+  const siteHtml = readFileSync(join(out, "site/index.html"), "utf8");
+  check(siteHtml.includes('href="https://github.com/kalahroudi/bulkhead-oss"') && !siteHtml.includes("@@") && !/bulkhead-oss-oss/.test(siteHtml) && !/github\.com\/kalahroudi\/bulkhead(?![-\w])/.test(siteHtml), "the site links follow the public repository constant, with no leftover tokens, no doubled suffix and no private URL");
+  const otherOut = join(tmp, "other-slug"); buildExport({ root, out: otherOut, version: "1.0.0", slug: "someone/else" });
+  check(JSON.parse(readFileSync(join(otherOut, "packages/core/package.json"), "utf8")).repository.url === "git+https://github.com/someone/else.git" && readFileSync(join(otherOut, "site/index.html"), "utf8").includes("https://github.com/someone/else"), "--repo changes the package metadata and the site links together");
   const rootManifest = JSON.parse(readFileSync(join(out, "package.json"), "utf8"));
   check(!JSON.stringify(rootManifest.scripts).match(/phase|mutation|catalog|decision/) && "gate:release" in rootManifest.scripts, "export root scripts reference no private gates");
   check(!JSON.stringify(JSON.parse(readFileSync(join(out, "packages/spec/package.json"), "utf8")).scripts).match(/catalog|decisions/), "export spec scripts reference no SPEC.md or decision lint");
@@ -190,10 +194,14 @@ try {
   check(bad1.status === 1 && /usage/.test(bad1.stderr), "the command rejects a malformed version");
   const bad2 = cli("9.9.9", "--dry-run", "--author", "Claude <c@example.com>");
   check(bad2.status === 1 && /(tool identity|no non-empty|uncommitted)/.test(bad2.stderr), "the command refuses a tool identity, a missing changelog section, or a dirty tree, before exporting");
+  const bad4 = cli("9.9.9", "--dry-run", "--author", "Ada <ada@example.org>", "--repo", "kalahroudi/bulkhead");
+  check(bad4.status === 1 && /(private repository|uncommitted|no non-empty)/.test(bad4.stderr), "the command refuses the private repository as --repo");
+  const bad5 = cli("9.9.9", "--dry-run", "--repo", "not a repo");
+  check(bad5.status === 1 && /--repo must look like owner\/name/.test(bad5.stderr), "the command rejects a malformed --repo");
   const bad3 = cli("9.9.9", "--dry-run", "--author", "Ada <ada@example.org>");
   check(bad3.status === 1 && /(no non-empty|uncommitted)/.test(bad3.stderr) && !/Export the public tree/.test(bad3.stdout), "the command stops on a missing changelog section or a dirty tree before exporting anything");
   // 13. Round-3 hardening, each with a test that can fail.
-  check(["https://github.com/kalahroudi/bulkhead.git", "https://github.com/Kalahroudi/bulkhead", "git@github.com:kalahroudi/bulkhead.git", "ssh://git@github.com/kalahroudi/bulkhead.git/", "https://user:tok@github.com/kalahroudi/bulkhead.git", "git+https://github.com/kalahroudi/bulkhead.git"].every((r) => throws(() => refuseIfPrivateRemote(r), /private repository/)) && !throws(() => refuseIfPrivateRemote("https://github.com/flamingosh/bulkhead.git"), /./) && !throws(() => refuseIfPrivateRemote(`file://${bare}`), /./), "the private repository is refused as a target in every spelling, and the public one is not");
+  check(["https://github.com/kalahroudi/bulkhead.git", "https://github.com/Kalahroudi/bulkhead", "git@github.com:kalahroudi/bulkhead.git", "ssh://git@github.com/kalahroudi/bulkhead.git/", "https://user:tok@github.com/kalahroudi/bulkhead.git", "git+https://github.com/kalahroudi/bulkhead.git"].every((r) => throws(() => refuseIfPrivateRemote(r), /private repository/)) && !throws(() => refuseIfPrivateRemote("https://github.com/kalahroudi/bulkhead-oss.git"), /./) && !throws(() => refuseIfPrivateRemote(`file://${bare}`), /./), "the private repository is refused as a target in every spelling, and the public one is not");
   check(throws(() => resolveIdentity("Ann <x> Lee <ann@example.org>"), /must look like/) && throws(() => resolveIdentity("Copilot <c@example.org>"), /tool identity/), "an author name git would mangle, or another tool's identity, is refused");
 
   // Verbatim message: trailing spaces, double blank lines and '#' headings survive, and the read-back does not misfire on them.

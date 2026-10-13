@@ -5,9 +5,13 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
-export const PUBLIC_REPO = "https://github.com/flamingosh/bulkhead.git";
-export const PRIVATE_URL = "https://github.com/kalahroudi/bulkhead";
-export const PUBLIC_URL = "https://github.com/flamingosh/bulkhead";
+/** The public repository, owner/name. The private repository is kalahroudi/bulkhead, so the public one needs a different name. */
+export const PUBLIC_SLUG = "kalahroudi/bulkhead-oss";
+export const publicUrlOf = (slug: string) => `https://github.com/${slug}`;
+export const PUBLIC_URL = publicUrlOf(PUBLIC_SLUG);
+export const PUBLIC_REPO = `${PUBLIC_URL}.git`;
+/** The private repository's URL, matched only as a whole: the public URL may start with the same text (`.../bulkhead-oss`). */
+const PRIVATE_URL_RE = /https:\/\/github\.com\/kalahroudi\/bulkhead(?![-\w])/g;
 /** Publish order matters: each package depends on the ones before it. */
 export const PACKAGES = [
   { dir: "packages/spec", name: "@kalahroudi/bulkhead-spec" },
@@ -195,10 +199,11 @@ export function trackedFiles(root: string): string[] {
   return String(r.stdout).split("\0").filter(Boolean);
 }
 
-export interface ExportOptions { root: string; out: string; version: string; templates?: string }
+export interface ExportOptions { root: string; out: string; version: string; templates?: string; slug?: string }
 
 /** Builds the public tree in `out` from the private repo's tracked files. Returns the list of exported files. */
-export function buildExport({ root, out, version, templates = join(root, "release") }: ExportOptions): string[] {
+export function buildExport({ root, out, version, templates = join(root, "release"), slug = PUBLIC_SLUG }: ExportOptions): string[] {
+  const publicUrl = publicUrlOf(slug);
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
   const files = trackedFiles(root).filter(shippable).filter((f) => existsSync(join(root, f)));
@@ -234,7 +239,8 @@ export function buildExport({ root, out, version, templates = join(root, "releas
   for (const file of walk(out)) {
     if (!TEXT.test(relative(out, file))) continue;
     const text = readFileSync(file, "utf8");
-    if (text.includes(PRIVATE_URL)) writeFileSync(file, text.split(PRIVATE_URL).join(PUBLIC_URL));
+    if (PRIVATE_URL_RE.test(text)) writeFileSync(file, text.replace(PRIVATE_URL_RE, publicUrl));
+    PRIVATE_URL_RE.lastIndex = 0;
   }
 
   // package.json files: release version, public URLs, and scripts that only make sense in the private repo removed.
@@ -244,9 +250,9 @@ export function buildExport({ root, out, version, templates = join(root, "releas
     const j = JSON.parse(readFileSync(p, "utf8"));
     if (PACKAGES.some((x) => x.dir === dir)) {
       j.version = version;
-      j.homepage = `${PUBLIC_URL}#readme`;
-      j.bugs = { url: `${PUBLIC_URL}/issues` };
-      j.repository = { type: "git", url: `git+${PUBLIC_URL}.git`, directory: dir };
+      j.homepage = `${publicUrl}#readme`;
+      j.bugs = { url: `${publicUrl}/issues` };
+      j.repository = { type: "git", url: `git+${publicUrl}.git`, directory: dir };
       j.publishConfig = { ...j.publishConfig, tag: npmTag(version) };
     }
     if (dir === "packages/spec") { j.scripts = { typecheck: j.scripts.typecheck, test: j.scripts.test, lint: "node scripts/lint-spec.ts", build: j.scripts.build, prepack: j.scripts.prepack }; }
@@ -273,6 +279,12 @@ export function buildExport({ root, out, version, templates = join(root, "releas
   copyTree(join(templates, "templates/ISSUE_TEMPLATE"), join(out, ".github/ISSUE_TEMPLATE"));
   copyTree(join(templates, "templates/workflows"), join(out, ".github/workflows"));
   copyTree(join(templates, "site"), join(out, "site"));
+  // Templates name the public repository with a token, so one constant (or --repo) decides it everywhere.
+  for (const file of walk(out)) {
+    if (!/\.(html|md|yml)$/.test(file)) continue;
+    const text = readFileSync(file, "utf8");
+    if (text.includes("@@PUBLIC_URL@@")) writeFileSync(file, text.split("@@PUBLIC_URL@@").join(publicUrl));
+  }
   return walk(out).map((f) => relative(out, f)).sort();
 }
 
