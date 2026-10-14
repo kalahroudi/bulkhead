@@ -941,7 +941,7 @@ export const probes: Probe[] = [
         for (const path of paths) for (const [who, opts] of [["owner", withCookie(owner.token)], ["anonymous", {}]] as const) {
           const r = await req(owner.h, route.method, path, opts);
           exercised++;
-          if (r.status !== 404) answered = true;
+          if (who === "owner" && (isParam ? r.status >= 200 && r.status < 300 : r.status !== 404 && r.status !== 405)) answered = true;
           if (r.status >= 500) unreadable.push(`${who} ${route.method} ${path}: HTTP ${r.status}`);
           checks.push({ name: `${who} ${route.method} ${path}`, ok: !seen(r), detail: `the stored secret was returned (HTTP ${r.status})` });
         }

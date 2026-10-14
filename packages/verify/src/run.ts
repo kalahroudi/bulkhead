@@ -45,6 +45,8 @@ export interface Fixture {
   url: URL;
   /** Where the fixture persists tenant SQLite files, and its route manifest: what a gate launcher would hand to a real target. */
   env: TargetEnv;
+  /** The fixture process, so a test can kill exactly this one. */
+  pid: number;
   stop(): Promise<void>;
 }
 
@@ -70,7 +72,7 @@ export function startFixture(bugs: string[]): Promise<Fixture> {
       const m = /LISTENING (\d+)/.exec(buf);
       if (m) {
         child.removeListener("exit", early);
-        resolve({ url: new URL(`http://127.0.0.1:${m[1]}`), env, stop: () => new Promise((r) => { if (child.exitCode !== null || child.signalCode !== null) { cleanup(); r(); return; } child.once("exit", () => r()); child.kill(); }) });
+        resolve({ url: new URL(`http://127.0.0.1:${m[1]}`), env, pid: child.pid!, stop: () => new Promise((r) => { if (child.exitCode !== null || child.signalCode !== null) { cleanup(); r(); return; } child.once("exit", () => r()); child.kill(); }) });
       }
     });
   });

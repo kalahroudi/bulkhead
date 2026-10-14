@@ -458,7 +458,7 @@ test("a live WAL-mode database (-wal and -shm present) is scanned without error 
 test("fixture cleanup: stopping a fixture that already died does not hang and removes its temp directory", async () => {
   const fx = await startFixture([]);
   const dir = fx.env.persistDir!;
-  const pid = Number((await new Promise<string>((r) => { const c = spawn("pgrep", ["-f", `fixture/server.ts`]); let o = ""; c.stdout.on("data", (d: Buffer) => (o += d)); c.on("close", () => r(o.trim().split("\n").pop() ?? "")); })));
+  const pid = fx.pid;
   assert.ok(pid > 0);
   process.kill(pid, "SIGKILL");
   await new Promise((r) => setTimeout(r, 300));
