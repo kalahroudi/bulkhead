@@ -1,12 +1,16 @@
 // Deliberately vulnerable fixture app. Never deploy. Bugs are toggled by FIXTURE_BUGS (comma list, or "all"/"none").
 import { createServer } from "node:http";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const ALL = [
   "missing-tenant-filter", "shared-cache-key", "skipped-signature-check", "tenant-from-header",
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
   "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
   "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors", "key-secret-length-ignored", "admin-user-create-refused", "listing-leaks-digest", "listing-leaks-token",
+  "notes-plaintext-at-rest", "secret-plaintext-at-rest", "plaintext-in-freed-page", "secret-readable-via-list", "secret-readable-via-param-route", "secret-echoed-on-store", "notes-plaintext-on-second", "secret-plaintext-on-second",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -27,6 +31,46 @@ const keys = new Map<string, { tenant: string; secret: string; role: Role; permi
 const tenantUsers = (tenant: string) => [...users.values()].filter((u) => users.get(`${tenant}|${u.email}`) === u);
 const COOKIE = "__Host-bk_session";
 const token = (n: number) => randomBytes(n).toString("base64url");
+
+// --- at-rest storage (only when FIXTURE_PERSIST_DIR is set): one SQLite file per tenant, WAL mode, classified columns sealed. ---
+// The fixture's own AES-256-GCM envelope `bk1:1:<nonce>:<ct>`; it shares nothing with the real implementation.
+const PERSIST = process.env.FIXTURE_PERSIST_DIR;
+const DATA_KEY = randomBytes(32);
+const dbs = new Map<string, DatabaseSync>();
+function seal(tenant: string, table: string, field: string, plain: string): string {
+  const nonce = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", DATA_KEY, nonce);
+  c.setAAD(Buffer.from(`${tenant}|${table}|${field}`));
+  const ct = Buffer.concat([c.update(plain, "utf8"), c.final(), c.getAuthTag()]);
+  return `bk1:1:${nonce.toString("base64url")}:${ct.toString("base64url")}`;
+}
+function tenantDb(tenant: string): DatabaseSync | null {
+  if (!PERSIST) return null;
+  let db = dbs.get(tenant);
+  if (!db) {
+    mkdirSync(PERSIST, { recursive: true });
+    db = new DatabaseSync(join(PERSIST, `${tenant}.sqlite`));
+    db.exec("pragma journal_mode = wal; create table if not exists notes (id integer primary key autoincrement, text text not null); create table if not exists tenant_secrets (name text primary key, value text not null); create table if not exists scratch (v text)");
+    dbs.set(tenant, db);
+  }
+  return db;
+}
+// Not in the seeded-bug catalog on purpose: these produce UNVERIFIED (the write never lands), which the catalog's fail-lists cannot express. Unit tests use them.
+function persistNote(tenant: string, text: string) {
+  const db = tenantDb(tenant);
+  if (!db) return;
+  if (bugs.has("notes-dropped")) return; // creates the tenant database on first use, then stores nothing
+  db.prepare("insert into notes (text) values (?)").run(bugs.has("notes-plaintext-at-rest") || (bugs.has("notes-plaintext-on-second") && notes.filter((n) => n.tenant === tenant).length >= 2) ? text : seal(tenant, "notes", "text", text));
+  if (bugs.has("plaintext-in-freed-page")) {
+    db.prepare("insert into scratch (v) values (?)").run(text);
+    db.exec("delete from scratch");
+  }
+}
+function persistSecret(tenant: string, name: string, value: string) {
+  if (bugs.has("secrets-dropped")) { tenantDb(tenant); return; }
+  tenantDb(tenant)?.prepare("insert or replace into tenant_secrets (name, value) values (?, ?)").run(name, bugs.has("secret-plaintext-at-rest") || (bugs.has("secret-plaintext-on-second") && [...secrets.keys()].filter((k) => k.startsWith(`${tenant}|`)).length >= 2) ? value : seal(tenant, "tenant_secrets", "value", value));
+}
+const secrets = new Map<string, string>(); // key: tenant|name
 
 const notes: { tenant: string; text: string }[] = [];
 const plans = new Map<string, string>();
@@ -189,6 +233,33 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     if (RANK[p.role] < (bugs.has("member-can-list-users") ? RANK.member : RANK.admin)) return reply(403, { error: "forbidden" });
     return reply(200, { keys: [...keys].filter(([, k]) => k.tenant === tenant).map(([id, k]) => ({ id, role: k.role, permissions: k.permissions, ...(bugs.has("listing-leaks-token") ? { x: token(32) } : {}), ...(bugs.has("listing-leaks-hash") ? { secret_hash: createHash("sha256").update(k.secret).digest("hex") } : {}) })) });
   }
+  // Tenant secrets (CRYPTO-5): a store route, a listing of names, a per-name metadata route. None may ever return the value.
+  if (method === "POST" && path === "/secrets") {
+    const p = principal(tenant, headers);
+    if (!p) return reply(401, { error: "authentication required" });
+    if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    const b = json();
+    if (typeof b.name !== "string" || typeof b.value !== "string") return reply(400, { error: "name and value required" });
+    secrets.set(`${tenant}|${b.name}`, b.value);
+    persistSecret(tenant, b.name, b.value);
+    return reply(201, { id: b.name, name: b.name, ...(bugs.has("secret-echoed-on-store") ? { value: b.value } : {}) });
+  }
+  if (method === "GET" && path === "/secrets") {
+    const p = principal(tenant, headers);
+    if (!p) return reply(401, { error: "authentication required" });
+    if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    return reply(200, { secrets: [...secrets].filter(([k]) => k.startsWith(`${tenant}|`)).map(([k, v]) => ({ name: k.slice(tenant.length + 1), ...(bugs.has("secret-readable-via-list") ? { value: v } : {}) })) });
+  }
+  const secretPath = /^\/secrets\/([^/]+)$/.exec(path);
+  if (method === "GET" && secretPath) {
+    const p = principal(tenant, headers);
+    if (!p) return reply(401, { error: "authentication required" });
+    if (RANK[p.role] < RANK.admin) return reply(403, { error: "forbidden" });
+    const name = decodeURIComponent(secretPath[1] as string);
+    const v = secrets.get(`${tenant}|${name}`);
+    if (v === undefined) return reply(404, { error: "not found" });
+    return reply(200, { name, stored: true, ...(bugs.has("secret-readable-via-param-route") ? { value: v } : {}) });
+  }
   return null;
 }
 
@@ -214,7 +285,9 @@ const server = createServer((req, res) => {
 
     if (req.method === "GET" && url.pathname === "/whoami") return send(200, { tenant });
     if (req.method === "POST" && url.pathname === "/notes") {
-      notes.push({ tenant, text: String(JSON.parse(body.toString() || "{}").text ?? "") });
+      const text = String(JSON.parse(body.toString() || "{}").text ?? "");
+      notes.push({ tenant, text });
+      persistNote(tenant, text);
       cache.clear();
       return send(201, { ok: true });
     }

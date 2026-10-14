@@ -1,6 +1,6 @@
 # DR-0010: Phase 4 crypto scoping (CRYPTO-1..5): design, order of work and open questions
 
-- Status: proposed (scoping only: no crypto code is written until the owner answers the open questions and accepts this record)
+- Status: proposed (owner answered all six open questions in session on 2026-10-14; the owner has not yet marked this record accepted, so no crypto work starts)
 - Date: 2026-10-13
 - Rules: CRYPTO-1, CRYPTO-2, CRYPTO-3, CRYPTO-4, CRYPTO-5, BOOT-1
 
@@ -14,7 +14,7 @@ The spec fixes the goals; it does not fix the design. What it already decides:
 - CRYPTO-5: tenant secrets are write-only through every route.
 - BOOT-1: missing keys fail closed at boot, never a plaintext fallback.
 
-Nothing of this exists yet: `packages/core/src/crypto/` is empty. That path is frozen and CODEOWNERS-protected, so building it needs this record accepted. The platform is Cloudflare Workers, so the only primitive is WebCrypto (no XChaCha20, no in-process KMS).
+Nothing of this exists yet: `packages/core/src/crypto/` does not exist. That path is frozen and CODEOWNERS-protected, so building it needs this record accepted. The platform is Cloudflare Workers, so the only primitive is WebCrypto (no XChaCha20, no in-process KMS).
 
 ## Decision
 Proposed design, each choice with a recommendation. The owner may override any of them.
@@ -24,8 +24,8 @@ Proposed design, each choice with a recommendation. The owner may override any o
 4. **AAD (CRYPTO-2): `bulkhead/v1|<tenantId>|<table>|<field>|<keyVersion>`.** This is what the spec requires. It does not bind the row, so ciphertext can be swapped between rows of the same column in one tenant. Binding the row id would close that but needs a spec amendment, which only the owner can make (open question 2). No check: nothing seals yet; the transplant scenario is built in step (d).
 5. **Keys (CRYPTO-3): master key as a versioned Worker secret** (`BULKHEAD_MASTER_KEY_V<n>`; BOOT-1 refuses to boot without the current version). A per-tenant data key is generated at provision time and stored wrapped under the master key, with the tenant id as wrap AAD, **in the control-plane D1, not in the tenant's Durable Object.** Shredding is then deleting that one row; the tenant's ciphertext is unreadable even if its object survives. Data keys are cached in isolate memory for at most 60 seconds, so shredding takes effect everywhere within a minute (open question 4). No check: the key hierarchy does not exist yet; BOOT-1's missing-key probe and the shredding scenario are built in step (e).
 6. **Structural enforcement (CRYPTO-1):** the classification file (`bulkhead.classification.json`, validated by `validateClassification`) generates `CHECK (col LIKE 'bk1:%')` on every `sensitive` and `secret` column, so a plaintext insert fails in the database itself, and the tenant handle gains a sealed write path. At tenant initialisation every column must be classified or the tenant refuses to initialise (fail closed, as BOOT-1). Raw `run`/`query` stay, because unclassified columns need them; the CHECK constraint, not discipline, protects classified ones. No check: the CHECK generation and the unclassified-column refusal are built in step (c), with catalog entries for each.
-7. **Verification needs a storage inspector, and over HTTP none can exist.** Recommended: the gate launcher (`scripts/verify-kernel.ts`) owns the local `--persist-to` directory, so it passes that path to verify, which opens the tenant SQLite files **read-only** and scans for the canary. Verify still never imports app code. On a non-local target (staging, production) no inspector is available, so CRYPTO-1 and CRYPTO-3 are reported **unverified, never green** there. No check: the inspector is built in step (a); until then the rules cannot be reported green, which is why they stay `proposed`.
-8. **Write-only secrets (CRYPTO-5):** a secret has a store route and no read route; verify reads the committed route manifest (ROUTE-2) and exercises every route whose manifest entry could return it, looking for the canary. Auth hashes (`password_hash`, `secret_hash`) stay hashed, not sealed, in v1: they are not recoverable by decryption. No check: the secret store route and its read-back scenario are built in step (g).
+7. **Verification needs a storage inspector, and over HTTP none can exist.** Recommended: the gate launcher (`scripts/verify-kernel.ts`) owns the local `--persist-to` directory, so it passes that path to verify, which opens the tenant SQLite files **read-only** and scans for the canary. Verify still never imports app code. On a non-local target (staging, production) no inspector is available, so CRYPTO-1 and CRYPTO-3 are reported **unverified, never green** there. Check: `test:packages/verify/test/inspector.test.ts::inspector never writes: the handle is read-only and a scan leaves every byte of the directory as it was`, `test:packages/verify/test/inspector.test.ts::without a storage directory the CRYPTO-1 probe is UNVERIFIED, never a pass, and the run is not green`. Built in step (a): the inspector reads the directory read-only and is directory-wide (it cannot tell which tenant's file changed); it has only been exercised against the verify fixture, not against workerd's real persist layout.
+8. **Write-only secrets (CRYPTO-5):** a secret has a store route and no read route; verify reads the committed route manifest (ROUTE-2) and exercises every route whose manifest entry could return it, looking for the canary. Auth hashes (`password_hash`, `secret_hash`) stay hashed, not sealed, in v1: they are not recoverable by decryption. Check: `test:packages/verify/test/inspector.test.ts::CRYPTO-5 coverage: only the owner's answer counts, a parameter route needs a 2xx, and {x} [x] * are parameters too`. Step (a) built the verify side only, and it reads GET/HEAD routes (parameters filled with the secret's name and id) and assumes a store route `POST /secrets {name, value}`; the real store route and non-GET routes that could echo a secret are step (g).
 9. **Honest limits, stated now.** The master key is a Worker secret, readable by anyone with deploy or secret-read rights on the Cloudflare account; there is no HSM or external KMS. Cloudflare's own at-rest encryption is not relied on. Memory in a running isolate holds a plaintext data key for up to 60 seconds. Shredding does not reach backups Cloudflare may hold. Master-key rotation needs a re-wrap job that this record does not scope. A green report still means no known leak paths, not proof of none. No check: these are limits, not behaviours, so nothing can enforce them.
 
 ## Open questions for the owner (recommended answers first)
@@ -35,6 +35,17 @@ Proposed design, each choice with a recommendation. The owner may override any o
 4. Data-key cache: 60 seconds (recommended), shorter at a per-request D1 read, or longer?
 5. Demo coverage: classify the demo's `notes.text` as `sensitive` and add a write-only `tenant_secrets` table so every rule has something to bite on (recommended), or keep the demo unchanged and use a dedicated fixture app?
 6. Master-key custody for production: Worker secret (recommended for now) or an external KMS later as its own record?
+
+## Owner answers (2026-10-14)
+The owner approved the recommended answer to all six questions:
+1. Nonces: counter in the tenant's Durable Object.
+2. AAD: the spec's three fields (tenant, table, field) plus key version; no row id, no spec amendment.
+3. Inspector: local persisted files only; staging and production report CRYPTO-1 and CRYPTO-3 as unverified.
+4. Data-key cache: 60 seconds.
+5. Demo coverage: extend the existing demo (`notes.text` as `sensitive`, a write-only `tenant_secrets` table); no separate fixture app.
+6. Master-key custody: Worker secret now; an external KMS would be its own record.
+
+Order of work agreed in session: this record's crypto steps (a) to (g) first, then the Better Auth spike (DR-0011), then making the verifier usable against an app other than the demo. Each needs its own go-ahead if the scope changes.
 
 ## Consequences
 Accepting this record unlocks step (a) only: the inspector, fixture and failing probes, with no implementation. Each later step is its own PR with the full gate and an independent review. CRYPTO rules stay `proposed` throughout; no attestation exists until Phase 7.

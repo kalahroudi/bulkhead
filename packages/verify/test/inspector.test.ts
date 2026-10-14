@@ -1,0 +1,565 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { fingerprintStorage, openReadOnly, scanStorage, storageChanged } from "../src/inspector.ts";
+import { FIXTURE_BOOTSTRAP_TOKEN, runProbes, selfCheckFailureIds, startFixture, verifyTarget } from "../src/run.ts";
+import { EventLog } from "../src/eventlog.ts";
+import { probes } from "../src/probes.ts";
+
+const CANARY = "CANARY-0123456789ab";
+const tmp = () => mkdtempSync(join(tmpdir(), "bulkhead-inspect-"));
+const digest = (dir: string) => readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => `${e.parentPath}/${e.name}:${createHash("sha256").update(readFileSync(join(e.parentPath, e.name))).digest("hex")}`).sort().join("\n");
+
+test("inspector finds a canary in a table column, through SQL and in the bytes", () => {
+  const dir = tmp();
+  const db = new DatabaseSync(join(dir, "t1.sqlite"));
+  db.exec(`create table notes (id integer primary key, text text); insert into notes (text) values ('${CANARY}')`);
+  db.close();
+  const scan = scanStorage(dir, [CANARY]);
+  assert.ok(scan.hits.some((h) => h.layer === "column" && h.where === "notes.text"), JSON.stringify(scan.hits));
+  assert.ok(scan.hits.some((h) => h.layer === "raw"));
+  assert.equal(scan.sqliteOpened, 1);
+  assert.deepEqual(scan.incomplete, []);
+});
+
+test("inspector finds a canary in a BLOB column", () => {
+  const dir = tmp();
+  const db = new DatabaseSync(join(dir, "t.sqlite"));
+  db.exec("create table b (v blob)");
+  db.prepare("insert into b values (?)").run(Buffer.from(`xx${CANARY}yy`));
+  db.close();
+  assert.ok(scanStorage(dir, [CANARY]).hits.some((h) => h.layer === "column" && h.where === "b.v"));
+});
+
+test("inspector finds a canary only the raw layer can see: a deleted row's bytes and a non-SQLite side file", () => {
+  const dir = tmp();
+  const db = new DatabaseSync(join(dir, "t2.sqlite"));
+  db.exec(`pragma journal_mode = wal; create table s (v text); insert into s values ('${CANARY}'); delete from s`);
+  writeFileSync(join(dir, "side.bin"), Buffer.from(`junk${CANARY}junk`));
+  const scan = scanStorage(dir, [CANARY]); // db still open: the plaintext lives in the WAL
+  db.close();
+  assert.equal(scan.hits.filter((h) => h.layer === "column").length, 0, "no cell holds it, so SQL alone would call this clean");
+  const files = new Set(scan.hits.filter((h) => h.layer === "raw").map((h) => h.file));
+  assert.ok(files.has("side.bin"));
+  assert.ok([...files].some((f) => f.includes("t2.sqlite")), `expected a hit in the database or WAL, got ${[...files]}`);
+});
+
+test("inspector reports a clean store as clean, and counts what it looked at", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, "nested"));
+  const db = new DatabaseSync(join(dir, "nested", "t3.sqlite"));
+  db.exec("create table notes (text text); insert into notes values ('bk1:1:abc:def')");
+  db.close();
+  const scan = scanStorage(dir, [CANARY]);
+  assert.deepEqual(scan.hits, []);
+  assert.equal(scan.rowsScanned, 1);
+  assert.equal(scan.filesScanned, 1);
+});
+
+test("inspector never writes: the handle is read-only and a scan leaves every byte of the directory as it was", () => {
+  const dir = tmp();
+  const path = join(dir, "t4.sqlite");
+  const db = new DatabaseSync(path);
+  db.exec("create table notes (text text); insert into notes values ('a')");
+  db.close();
+  const before = digest(dir);
+  const ro = openReadOnly(path);
+  assert.throws(() => ro.exec("insert into notes values ('b')"), /readonly/i);
+  assert.throws(() => ro.exec("drop table notes"), /readonly/i);
+  ro.close();
+  scanStorage(dir, [CANARY]);
+  assert.equal(digest(dir), before);
+  assert.deepEqual(readdirSync(dir), ["t4.sqlite"]);
+});
+
+test("inspector refuses a path that is not a directory instead of reporting 'nothing found'", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "f"), "x");
+  assert.throws(() => scanStorage(join(dir, "f"), [CANARY]), /not a directory/);
+  assert.throws(() => scanStorage(join(dir, "missing"), [CANARY]), /ENOENT/);
+});
+
+test("inspector says so when a database cannot be read, rather than skipping it", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "broken.sqlite"), Buffer.concat([Buffer.from("SQLite format 3\0"), Buffer.alloc(200, 7)]));
+  const scan = scanStorage(dir, [CANARY]);
+  assert.ok(scan.incomplete.length > 0);
+});
+
+const storage = probes.find((p) => p.id === "storage-canary-at-rest")!;
+const secrets = probes.find((p) => p.id === "secret-write-only-readback")!;
+
+test("without a storage directory the CRYPTO-1 probe is UNVERIFIED, never a pass, and the run is not green", async () => {
+  const fx = await startFixture([]);
+  const dir = tmp();
+  try {
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { routes: fx.env.routes });
+    assert.ok(r?.unverified, "must carry an unverified reason");
+    assert.equal(r?.passed, false);
+    assert.equal(r?.skipped, undefined);
+    const report = await verifyTarget(fx.url, new EventLog(dir, "verify"), ["CRYPTO-1"], FIXTURE_BOOTSTRAP_TOKEN, {});
+    assert.equal(report.valid, true);
+    assert.equal(report.findings.length, 0);
+    assert.equal(report.unverified.length, 1);
+    const logged = readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => readFileSync(join(e.parentPath, e.name), "utf8")).join("\n");
+    const fin = JSON.parse(logged.split("\n").filter((l) => l.includes('"phase":"finished"')).pop()!) as { data: Record<string, unknown> };
+    assert.equal(fin.data.passed, false);
+    assert.equal(fin.data.unverifiedCount, 1);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("an empty storage directory after a successful write is unverified, not a pass", async () => {
+  const fx = await startFixture([]);
+  try {
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: tmp() }); // wrong directory
+    assert.match(r?.unverified ?? "", /no SQLite database/);
+    assert.equal(r?.passed, false);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("a missing manifest, or one without a secret store route, leaves CRYPTO-5 unverified", async () => {
+  const fx = await startFixture([]);
+  try {
+    const [a] = await runProbes(fx.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, {});
+    assert.match(a?.unverified ?? "", /no route manifest/);
+    const [b] = await runProbes(fx.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [{ method: "GET", path: "/notes" }] });
+    assert.match(b?.unverified ?? "", /no POST \/secrets/);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("CRYPTO-5 never passes if a read-back route errors: a 500 hides what it would return", async () => {
+  const { createServer } = await import("node:http");
+  const stub = createServer((req, res) => {
+    req.resume();
+    const ok = (status: number, extra: Record<string, string> = {}) => { res.writeHead(status, { "content-type": "application/json", ...extra }); res.end("{}"); };
+    if (req.url === "/auth/bootstrap") return ok(201);
+    if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
+    if (req.url === "/secrets" && req.method === "POST") return ok(201);
+    if (req.url === "/boom") return ok(500);
+    if (req.url === "/clean" || req.url === "/secrets") return ok(200);
+    return ok(404);
+  });
+  await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
+  const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
+  try {
+    const routes = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }];
+    const [clean] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes });
+    assert.equal(clean?.passed, true, "control: without a 5xx route the same stub passes");
+    const [r] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...routes, { method: "GET", path: "/boom" }] });
+    assert.equal(r?.passed, false);
+    assert.match(r?.unverified ?? "", /HTTP 500/);
+  } finally {
+    await new Promise<void>((r) => { stub.close(() => r()); stub.closeAllConnections(); });
+  }
+});
+
+test("each new probe passes the fixed fixture and fails only on its own seeded bugs", async () => {
+  const cases: [string, string[]][] = [
+    ["notes-plaintext-at-rest", ["storage-canary-at-rest"]],
+    ["secret-plaintext-at-rest", ["storage-canary-at-rest"]],
+    ["plaintext-in-freed-page", ["storage-canary-at-rest"]],
+    ["secret-readable-via-list", ["secret-write-only-readback"]],
+    ["secret-readable-via-param-route", ["secret-write-only-readback"]],
+    ["secret-echoed-on-store", ["secret-write-only-readback"]],
+    ["notes-plaintext-on-second", ["storage-canary-at-rest"]],
+    ["secret-plaintext-on-second", ["storage-canary-at-rest"]],
+  ];
+  for (const [bug, expected] of [["", []] as [string, string[]], ...cases]) {
+    const fx = await startFixture(bug ? [bug] : []);
+    try {
+      const rs = await runProbes(fx.url, [storage, secrets], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+      assert.deepEqual(rs.filter((r) => r.unverified !== undefined).map((r) => r.unverified), [], `${bug}: nothing may be unverified in the self-check`);
+      assert.deepEqual(rs.filter((r) => !r.passed).map((r) => r.probe.id).sort(), expected, bug || "fixed fixture");
+    } finally {
+      await fx.stop();
+    }
+  }
+});
+
+test("the freed-page leak is invisible to the column scan and visible to the raw scan", async () => {
+  const fx = await startFixture(["plaintext-in-freed-page"]);
+  try {
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.equal(r?.passed, false);
+    assert.match(r?.evidence ?? "", /raw /);
+    assert.doesNotMatch(r?.evidence ?? "", /column /);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("CLI: an unverified selected rule exits 3 with UNVERIFIED on stdout; a bad --persist-dir is refused", async () => {
+  const fx = await startFixture([]);
+  const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+  const run = (args: string[]) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    const c = spawn(process.execPath, ["--no-warnings", cli, "run", "--target", fx.url.origin, "--log-dir", tmp(), ...args], { env: { ...process.env, BULKHEAD_VERIFY_BOOTSTRAP_TOKEN: FIXTURE_BOOTSTRAP_TOKEN } });
+    let stdout = "", stderr = "";
+    c.stdout.on("data", (d: Buffer) => (stdout += d));
+    c.stderr.on("data", (d: Buffer) => (stderr += d));
+    c.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+  try {
+    const noDir = await run(["--rules", "CRYPTO-1"]);
+    assert.equal(noDir.status, 3, noDir.stdout + noDir.stderr);
+    assert.match(noDir.stdout, /^UNVERIFIED CRYPTO-1 storage-canary-at-rest:/m);
+    assert.doesNotMatch(noDir.stdout, /^pass /m);
+    const mixed = await run(["--rules", "CRYPTO-1,TENANT-1"]);
+    assert.equal(mixed.status, 3, "a passing TENANT-1 must not hide the unverified CRYPTO-1");
+    assert.match(mixed.stdout, /^pass TENANT-1/m);
+    const bad = await run(["--rules", "CRYPTO-1", "--persist-dir", join(fx.env.persistDir!, "nope")]);
+    assert.equal(bad.status, 2, bad.stdout + bad.stderr);
+    const ok = await run(["--rules", "CRYPTO-1,CRYPTO-5", "--persist-dir", fx.env.persistDir!, "--route-manifest", new URL("../fixture/route-manifest.json", import.meta.url).pathname]);
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.match(ok.stdout, /^pass CRYPTO-1 storage-canary-at-rest/m);
+    assert.match(ok.stdout, /^pass CRYPTO-5 secret-write-only-readback/m);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("VERIFY-1: nothing under verify imports core, auth, the demo or any workspace package other than spec", () => {
+  const root = new URL("../", import.meta.url).pathname;
+  const bad: string[] = [];
+  for (const dir of ["src", "test", "fixture"])
+    for (const f of readdirSync(join(root, dir)).filter((x) => x.endsWith(".ts"))) {
+      const text = readFileSync(join(root, dir, f), "utf8");
+      for (const m of text.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+        const spec = m[1]!;
+        if (spec.startsWith("@kalahroudi/") && spec !== "@kalahroudi/bulkhead-spec") bad.push(`${dir}/${f}: ${spec}`);
+        if (/(^|\/)(packages\/(core|auth)|examples)(\/|$)/.test(spec) || (spec.startsWith("../") && /\.\.\/(\.\.\/)+(packages|examples)/.test(spec))) bad.push(`${dir}/${f}: ${spec}`);
+      }
+    }
+  assert.deepEqual(bad, []);
+  assert.ok(existsSync(join(root, "src/inspector.ts")));
+});
+
+test("the self-check counts an unverified probe as a mismatch, never as nothing", () => {
+  const mk = (extra: object) => ({ probe: storage, passed: false, evidence: "", reproduction: "", ...extra });
+  assert.deepEqual(selfCheckFailureIds([mk({ unverified: "no dir" })]), ["UNVERIFIED:storage-canary-at-rest"]);
+  assert.deepEqual(selfCheckFailureIds([mk({ skipped: "n/a" })]), []);
+  assert.deepEqual(selfCheckFailureIds([mk({})]), ["storage-canary-at-rest"]);
+  assert.deepEqual(selfCheckFailureIds([mk({ passed: true })]), []);
+});
+
+test("symlinks: one to a file is scanned; one to a directory, a dangling one, and a FIFO are reported incomplete, never skipped silently", async () => {
+  const outside = tmp();
+  writeFileSync(join(outside, "real.bin"), `x${CANARY}x`);
+  const dir = tmp();
+  writeFileSync(join(dir, "inside.bin"), `y${CANARY}y`);
+  symlinkSync(join(dir, "inside.bin"), join(dir, "link-to-file"));
+  let scan = scanStorage(dir, [CANARY]);
+  assert.ok(scan.hits.some((h) => h.file === "link-to-file"), "a link to a file inside the directory is followed");
+  assert.deepEqual(scan.incomplete, []);
+  const escaping = tmp();
+  symlinkSync(join(outside, "real.bin"), join(escaping, "escape"));
+  scan = scanStorage(escaping, [CANARY]);
+  assert.deepEqual(scan.hits, [], "a link out of the directory is never read");
+  assert.ok(scan.incomplete.some((m) => m.startsWith("escape:") && /outside/.test(m)), scan.incomplete.join("|"));
+  assert.equal(fingerprintStorage(escaping).size, 0, "nor fingerprinted");
+  const dir2 = tmp();
+  symlinkSync(outside, join(dir2, "link-to-dir"));
+  symlinkSync(join(outside, "nowhere"), join(dir2, "dangling"));
+  const { spawnSync } = await import("node:child_process");
+  spawnSync("mkfifo", [join(dir2, "fifo")]);
+  scan = scanStorage(dir2, [CANARY]);
+  assert.ok(scan.incomplete.some((m) => m.startsWith("link-to-dir:")), scan.incomplete.join("|"));
+  assert.ok(scan.incomplete.some((m) => m.startsWith("dangling:")));
+  assert.ok(scan.incomplete.some((m) => m.startsWith("fifo:")));
+});
+
+test("a storage directory with an unscannable entry can never yield a CRYPTO-1 pass", async () => {
+  const fx = await startFixture([]);
+  try {
+    symlinkSync(tmp(), join(fx.env.persistDir!, "stray-link"));
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.match(r?.unverified ?? "", /scan was incomplete.*stray-link/);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("fingerprint detects growth, rewrite and new files", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "a"), "1");
+  const a = fingerprintStorage(dir);
+  assert.equal(storageChanged(a, fingerprintStorage(dir)), false);
+  writeFileSync(join(dir, "a"), "12");
+  assert.equal(storageChanged(a, fingerprintStorage(dir)), true);
+  const b = fingerprintStorage(dir);
+  writeFileSync(join(dir, "b"), "");
+  assert.equal(storageChanged(b, fingerprintStorage(dir)), true);
+});
+
+test("CRYPTO-1 is unverified when the plant demonstrably did not reach the inspected directory, even if that directory holds other rows", async () => {
+  const other = tmp();
+  const db = new DatabaseSync(join(other, "someone-else.sqlite"));
+  db.exec("create table t (v text); insert into t values ('unrelated row')");
+  db.close();
+  const fx = await startFixture([]);
+  try {
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: other, routes: fx.env.routes });
+    assert.match(r?.unverified ?? "", /did not change after the second notes/);
+    assert.equal(r?.passed, false);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("CRYPTO-1 without POST /secrets in the manifest is unverified for the secret class, but a notes leak is still a finding", async () => {
+  const noSecrets = (await import("node:fs")).readFileSync(new URL("../fixture/route-manifest.json", import.meta.url), "utf8");
+  const routes = (JSON.parse(noSecrets) as { method: string; path: string }[]).filter((r) => !r.path.startsWith("/secrets"));
+  const clean = await startFixture([]);
+  try {
+    const [r] = await runProbes(clean.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: clean.env.persistDir, routes });
+    assert.match(r?.unverified ?? "", /only the notes half was checked/);
+    const [noManifest] = await runProbes(clean.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: clean.env.persistDir });
+    assert.match(noManifest?.unverified ?? "", /only the notes half was checked/);
+  } finally {
+    await clean.stop();
+  }
+  const leaky = await startFixture(["notes-plaintext-at-rest"]);
+  try {
+    const [r] = await runProbes(leaky.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: leaky.env.persistDir, routes });
+    assert.equal(r?.unverified, undefined);
+    assert.equal(r?.passed, false);
+    assert.match(r?.evidence ?? "", /plaintext found in storage/);
+  } finally {
+    await leaky.stop();
+  }
+});
+
+test("CRYPTO-5: a parameter route that answers 404 to every fill value was not exercised, so the probe is unverified and names it", async () => {
+  const { createServer } = await import("node:http");
+  const stub = createServer((req, res) => {
+    req.resume();
+    const ok = (status: number, extra: Record<string, string> = {}) => { res.writeHead(status, { "content-type": "application/json", ...extra }); res.end("{}"); };
+    if (req.url === "/auth/bootstrap") return ok(201);
+    if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
+    if (req.url === "/secrets" && req.method === "POST") return ok(201);
+    if (req.url === "/clean" || req.url === "/secrets") return ok(200);
+    return ok(404);
+  });
+  await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
+  const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
+  try {
+    const base = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }];
+    const [r] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...base, { method: "GET", path: "/secrets/:name" }] });
+    assert.equal(r?.passed, false);
+    assert.match(r?.unverified ?? "", /GET \/secrets\/:name/);
+    const [ok] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: base });
+    assert.equal(ok?.passed, true, "control: without the 404-only parameter route it passes");
+    assert.match(ok?.evidence ?? "", /GET\/HEAD routes in the manifest only/);
+  } finally {
+    await new Promise<void>((r) => { stub.close(() => r()); stub.closeAllConnections(); });
+  }
+});
+
+/** A stub target for CRYPTO-5: bootstrap, login and the secret store succeed; `routes` decides every other answer by (path, has-cookie). */
+async function stubTarget(answer: (path: string, cookie: boolean) => number) {
+  const { createServer } = await import("node:http");
+  const server = createServer((req, res) => {
+    req.resume();
+    const ok = (status: number, extra: Record<string, string> = {}) => { res.writeHead(status, { "content-type": "application/json", ...extra }); res.end("{}"); };
+    if (req.url === "/auth/bootstrap") return ok(201);
+    if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
+    if (req.url === "/secrets" && req.method === "POST") return ok(201);
+    return ok(answer(req.url ?? "", Boolean(req.headers.cookie)));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  return { url: new URL(`http://127.0.0.1:${(server.address() as { port: number }).port}`), stop: () => new Promise<void>((r) => { server.close(() => r()); server.closeAllConnections(); }) };
+}
+const STORE = { method: "POST", path: "/secrets" };
+
+test("CRYPTO-5 coverage: only the owner's answer counts, a parameter route needs a 2xx, and {x} [x] * are parameters too", async () => {
+  const cases: { name: string; answer: (p: string, c: boolean) => number; routes: { method: string; path: string }[]; unverified: RegExp | null }[] = [
+    { name: "param route: owner 404, anonymous 401", answer: (p, c) => (p.startsWith("/t/") ? (c ? 404 : 401) : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: /GET \/t\/:id/ },
+    { name: "param route: owner 403, anonymous 200", answer: (p, c) => (p.startsWith("/t/") ? (c ? 403 : 200) : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: /GET \/t\/:id/ },
+    { name: "{id} form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/{id}" }], unverified: /GET \/t\/\{id\}/ },
+    { name: "[id] form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/[id]" }], unverified: /GET \/t\/\[id\]/ },
+    { name: "* form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/*" }], unverified: /GET \/t\/\*/ },
+    { name: "owner gets 401 on every plain route", answer: (p, c) => (c ? 401 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }], unverified: /nothing was really read back/ },
+    { name: "owner gets 403 on every plain route", answer: (p, c) => (c ? 403 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }], unverified: /nothing was really read back/ },
+    { name: "owner gets 400 on every plain route", answer: (p, c) => (c ? 400 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }], unverified: /nothing was really read back/ },
+    { name: "only GET /healthz answers 200: nothing secret-related was read", answer: (p) => (p === "/healthz" ? 200 : 404), routes: [STORE, { method: "GET", path: "/healthz" }], unverified: /none is secret-related/ },
+    { name: "every GET in the manifest answers 404", answer: () => 404, routes: [STORE, { method: "GET", path: "/a" }, { method: "GET", path: "/b" }], unverified: /nothing was really read back/ },
+    { name: "positive control: :id answered 200 for the owner", answer: () => 200, routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: null },
+    { name: "positive control: {id} answered 200", answer: () => 200, routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/{id}" }], unverified: null },
+  ];
+  for (const c of cases) {
+    const stub = await stubTarget(c.answer);
+    try {
+      const [r] = await runProbes(stub.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: c.routes });
+      if (c.unverified) { assert.match(r?.unverified ?? "", c.unverified, c.name); assert.equal(r?.passed, false, c.name); }
+      else { assert.equal(r?.unverified, undefined, `${c.name}: ${r?.evidence}`); assert.equal(r?.passed, true, c.name); }
+    } finally {
+      await stub.stop();
+    }
+  }
+});
+
+test("CRYPTO-1: a write that creates the tenant database but stores nothing is UNVERIFIED on the second plant, notes and secrets separately", async () => {
+  for (const [bug, which, other] of [["notes-dropped", "notes", "secrets"], ["secrets-dropped", "secrets", "notes"]] as const) {
+    const fx = await startFixture([bug]);
+    try {
+      const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+      assert.equal(r?.passed, false, bug);
+      assert.match(r?.unverified ?? "", new RegExp(`second ${which} plant`), bug);
+      assert.doesNotMatch(r?.unverified ?? "", new RegExp(`second ${other} plant`), bug);
+    } finally {
+      await fx.stop();
+    }
+  }
+});
+
+test("CRYPTO-1: the persist directory vanishing mid-run is UNVERIFIED, not a thrown error", async () => {
+  const { createServer } = await import("node:http");
+  const dir = tmp();
+  writeFileSync(join(dir, "seed"), "x");
+  const stub = createServer((req, res) => {
+    req.resume();
+    if (req.method === "POST" && req.url === "/notes") rmSync(dir, { recursive: true, force: true });
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
+  try {
+    const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
+    const results = await runProbes(url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: dir });
+    assert.match(results[0]?.unverified ?? "", /could not be read/);
+    assert.doesNotMatch(results[0]?.evidence ?? "", /probe error/);
+  } finally {
+    await new Promise<void>((r) => { stub.close(() => r()); stub.closeAllConnections(); });
+  }
+});
+
+test("a live WAL-mode database (-wal and -shm present) is scanned without error and without changing any existing byte", () => {
+  const dir = tmp();
+  const db = new DatabaseSync(join(dir, "live.sqlite"));
+  db.exec(`pragma journal_mode = wal; create table n (v text); insert into n values ('${CANARY}')`);
+  const names = readdirSync(dir);
+  assert.ok(names.includes("live.sqlite-wal") && names.includes("live.sqlite-shm"), names.join());
+  const bytes = (f: string) => readFileSync(join(dir, f));
+  const before = Object.fromEntries(names.filter((f) => !f.endsWith("-shm")).map((f) => [f, bytes(f)]));
+  const scan = scanStorage(dir, [CANARY]);
+  assert.deepEqual(scan.incomplete, []);
+  assert.ok(scan.hits.some((h) => h.layer === "column" && h.where === "n.v"), "committed WAL content is visible to the column scan");
+  for (const [f, b] of Object.entries(before)) assert.ok(bytes(f).equals(b), `${f} changed`);
+  assert.deepEqual(readdirSync(dir).sort(), names.sort());
+  db.exec("insert into n values ('still writable by the owner')"); // the scan did not lock the live writer out
+  db.close();
+});
+
+test("fixture cleanup: stopping a fixture that already died does not hang and removes its temp directory", async () => {
+  const fx = await startFixture([]);
+  const dir = fx.env.persistDir!;
+  const pid = fx.pid;
+  assert.ok(pid > 0);
+  process.kill(pid, "SIGKILL");
+  await new Promise((r) => setTimeout(r, 300));
+  await fx.stop();
+  assert.equal(existsSync(dir), false);
+});
+
+test("a file that vanishes mid-scan is incomplete, and a leak found elsewhere stays a leak", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "a-leaky.bin"), `x${CANARY}x`);
+  writeFileSync(join(dir, "b-vanishing.bin"), "y");
+  writeFileSync(join(dir, "c-clean.bin"), "z");
+  const scan = scanStorage(dir, [CANARY], (f) => { if (f === "b-vanishing.bin") rmSync(join(dir, f)); });
+  assert.ok(scan.hits.some((h) => h.file === "a-leaky.bin"), "hits collected before the race are kept");
+  assert.ok(scan.incomplete.some((m) => m.startsWith("b-vanishing.bin:")), scan.incomplete.join("|"));
+  assert.equal(scan.filesScanned, 2, "scanning carried on past the vanished file");
+});
+
+test("CRYPTO-1: a leak is a FAIL even when the directory also holds an unscannable entry", async () => {
+  // Probe-level rule: leak first, incompleteness only blocks a pass.
+  const fx = await startFixture(["notes-plaintext-at-rest"]);
+  try {
+    symlinkSync(join(tmp(), "nowhere"), join(fx.env.persistDir!, "dangling")); // makes `incomplete` non-empty
+    const [leak] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.equal(leak?.unverified, undefined);
+    assert.equal(leak?.passed, false);
+    assert.match(leak?.evidence ?? "", /plaintext found/);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("CRYPTO-1: a setup error in the secret half does not hide a notes leak", async () => {
+  const fx = await startFixture(["notes-plaintext-at-rest"]);
+  try {
+    // Claim a secret store route the owner cannot use: wrong bootstrap token makes ownerTenant fail after the notes were planted.
+    const [r] = await runProbes(fx.url, [storage], "wrong-bootstrap-token", fx.env);
+    assert.equal(r?.unverified, undefined);
+    assert.equal(r?.passed, false);
+    assert.match(r?.evidence ?? "", /plaintext found in storage/);
+  } finally {
+    await fx.stop();
+  }
+  const clean = await startFixture([]);
+  try {
+    const [r] = await runProbes(clean.url, [storage], "wrong-bootstrap-token", clean.env);
+    assert.match(r?.evidence ?? "", /bootstrapping an owner/, "without a leak the setup error is what gets reported");
+  } finally {
+    await clean.stop();
+  }
+});
+
+test("CRYPTO-1: a leak that appears only on the second plant is caught (the second marker is scanned)", async () => {
+  for (const [bug, ] of [["notes-plaintext-on-second"], ["secret-plaintext-on-second"]] as const) {
+    const fx = await startFixture([bug]);
+    try {
+      const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+      assert.equal(r?.passed, false, bug);
+      assert.match(r?.evidence ?? "", /plaintext found in storage/, bug);
+    } finally {
+      await fx.stop();
+    }
+  }
+});
+
+test("CRYPTO-1: databases with no rows after a plant that changed the directory are unverified (the rows guard is reachable)", async () => {
+  const { createServer } = await import("node:http");
+  const { appendFileSync } = await import("node:fs");
+  const dir = tmp();
+  const db = new DatabaseSync(join(dir, "empty.sqlite"));
+  db.exec("create table notes (text text)");
+  db.close();
+  const stub = createServer((req, res) => {
+    req.resume();
+    if (req.method === "POST") appendFileSync(join(dir, "activity.log"), "x"); // something changes, but no row is stored
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
+  try {
+    const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
+    const [r] = await runProbes(url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: dir });
+    assert.match(r?.unverified ?? "", /hold no rows/);
+  } finally {
+    await new Promise<void>((r) => { stub.close(() => r()); stub.closeAllConnections(); });
+  }
+});
+
+test("CRYPTO-1 pass evidence states its recorded limits", async () => {
+  const fx = await startFixture([]);
+  try {
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.equal(r?.passed, true, r?.evidence);
+    assert.match(r?.evidence ?? "", /Classified fields planted: notes, secrets/);
+    assert.match(r?.evidence ?? "", /directory-wide, not per tenant/);
+  } finally {
+    await fx.stop();
+  }
+});
