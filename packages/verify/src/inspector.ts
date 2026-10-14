@@ -2,8 +2,8 @@
 // attacker with disk access would: every table and column through SQL, and every raw byte of every file (pages, WAL,
 // journals, anything else under the directory). It opens databases READ-ONLY and never imports app or core code (VERIFY-1).
 // Local persisted files only: on a non-local target there is no directory, and callers must report "unverified".
-import { closeSync, openSync, readSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, openSync, readSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 export interface StorageHit {
@@ -29,19 +29,22 @@ export interface StorageScan {
 const SQLITE_MAGIC = Buffer.from("SQLite format 3\0");
 
 /**
- * Every regular file under `dir`. A symlink is resolved with stat and scanned when it points at a file; anything the walk
- * cannot scan (a link to a directory or to nowhere, a socket, a FIFO) is recorded in `incomplete`, never skipped silently.
+ * Every regular file under `dir`. A symlink is followed only when it points at a regular file that really lies inside
+ * `dir` (checked with realpath, so a link out of the directory is never read). Anything else the walk cannot scan (a link
+ * to a directory, to nowhere or outside, a socket, a FIFO) is recorded in `incomplete`, never skipped silently.
  */
-function filesUnder(dir: string, incomplete: string[], rel = ""): string[] {
+function filesUnder(dir: string, incomplete: string[], root = realpathSync(dir), rel = ""): string[] {
   const out: string[] = [];
   for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
     const p = rel ? `${rel}/${e.name}` : e.name;
-    if (e.isDirectory()) out.push(...filesUnder(dir, incomplete, p));
+    if (e.isDirectory()) out.push(...filesUnder(dir, incomplete, root, p));
     else if (e.isFile()) out.push(p);
     else if (e.isSymbolicLink()) {
       try {
-        if (statSync(join(dir, p)).isFile()) out.push(p);
-        else incomplete.push(`${p}: symlink does not point at a regular file, not scanned`);
+        const target = realpathSync(join(dir, p));
+        if (!statSync(target).isFile()) incomplete.push(`${p}: symlink does not point at a regular file, not scanned`);
+        else if (target !== root && !target.startsWith(root + sep)) incomplete.push(`${p}: symlink points outside the storage directory, not read`);
+        else out.push(p);
       } catch {
         incomplete.push(`${p}: dangling symlink, not scanned`);
       }

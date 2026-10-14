@@ -55,9 +55,11 @@ function tenantDb(tenant: string): DatabaseSync | null {
   }
   return db;
 }
+// Not in the seeded-bug catalog on purpose: these produce UNVERIFIED (the write never lands), which the catalog's fail-lists cannot express. Unit tests use them.
 function persistNote(tenant: string, text: string) {
   const db = tenantDb(tenant);
   if (!db) return;
+  if (bugs.has("notes-dropped")) return; // creates the tenant database on first use, then stores nothing
   db.prepare("insert into notes (text) values (?)").run(bugs.has("notes-plaintext-at-rest") ? text : seal(tenant, "notes", "text", text));
   if (bugs.has("plaintext-in-freed-page")) {
     db.prepare("insert into scratch (v) values (?)").run(text);
@@ -65,6 +67,7 @@ function persistNote(tenant: string, text: string) {
   }
 }
 function persistSecret(tenant: string, name: string, value: string) {
+  if (bugs.has("secrets-dropped")) { tenantDb(tenant); return; }
   tenantDb(tenant)?.prepare("insert or replace into tenant_secrets (name, value) values (?, ?)").run(name, bugs.has("secret-plaintext-at-rest") ? value : seal(tenant, "tenant_secrets", "value", value));
 }
 const secrets = new Map<string, string>(); // key: tenant|name

@@ -60,14 +60,17 @@ export function startFixture(bugs: string[]): Promise<Fixture> {
   });
   return new Promise((resolve, reject) => {
     let buf = "";
-    child.once("error", (e) => { rmSync(persistDir, { recursive: true, force: true }); reject(e); });
-    child.once("exit", (c) => { rmSync(persistDir, { recursive: true, force: true }); reject(new Error(`fixture exited early (${c})`)); });
+    const cleanup = () => rmSync(persistDir, { recursive: true, force: true });
+    child.once("error", (e) => { cleanup(); reject(e); });
+    child.once("exit", cleanup); // the temp dir goes whenever the fixture dies, early, mid-run or on stop
+    const early = (c: number | null) => reject(new Error(`fixture exited early (${c})`));
+    child.once("exit", early);
     child.stdout.on("data", (d: Buffer) => {
       buf += d.toString();
       const m = /LISTENING (\d+)/.exec(buf);
       if (m) {
-        child.removeAllListeners("exit");
-        resolve({ url: new URL(`http://127.0.0.1:${m[1]}`), env, stop: () => new Promise((r) => { child.once("exit", () => { rmSync(persistDir, { recursive: true, force: true }); r(); }); child.kill(); }) });
+        child.removeListener("exit", early);
+        resolve({ url: new URL(`http://127.0.0.1:${m[1]}`), env, stop: () => new Promise((r) => { if (child.exitCode !== null || child.signalCode !== null) { cleanup(); r(); return; } child.once("exit", () => r()); child.kill(); }) });
       }
     });
   });

@@ -73,6 +73,9 @@ const unverified = (reason: string, reproduction: string) => ({ passed: false, e
  * The tenant-secret store route the CRYPTO-5 probe plants through: POST /secrets {name, value}. This is a verify-side
  * convention that DR-0010 step (g) has not fixed yet (see the report); a target whose manifest lacks it is "unverified".
  */
+/** Path parameter forms a manifest may use. */
+const PARAM_ALL = /:[A-Za-z_]\w*|\{[^}/]+\}|\[[^\]/]+\]|\*/g;
+const PARAM = new RegExp(PARAM_ALL.source);
 const SECRET_STORE = { method: "POST", path: "/secrets" } as const;
 const hasStoreRoute = (routes: ManifestRoute[] | undefined) => !!routes?.some((r) => r.method === SECRET_STORE.method && r.path === SECRET_STORE.path);
 
@@ -844,30 +847,47 @@ export const probes: Probe[] = [
       const { req, host, persistDir } = ctx;
       const note = marker();
       const withSecret = hasStoreRoute(ctx.routes);
-      const reproduction = `Plant ${note} via POST /notes (Host: ${host("atrest-n")}, a classified field) and a second marker via POST /secrets as an owner (needs POST /secrets in the route manifest, else unverified). Check that the persisted-storage directory changed after each plant. Then open every SQLite file under it read-only and scan every table cell and every raw byte (pages, WAL) for the markers.`;
+      const reproduction = `Plant ${note} via POST /notes (Host: ${host("atrest-n")}, a classified field) and a second marker via POST /secrets as an owner (needs POST /secrets in the route manifest, else unverified). Plant each twice on the same tenant and check that the persisted-storage directory changed after the second plant. Then open every SQLite file under it read-only and scan every table cell and every raw byte (pages, WAL) for the markers.`;
       if (!persistDir) return unverified("no persisted-storage directory supplied (--persist-dir); a storage read is impossible over HTTP, so CRYPTO-1 is unverified on this target", reproduction);
       const markers = [note];
       const stale: string[] = [];
-      let snap: Map<string, string>;
-      try { snap = fingerprintStorage(persistDir); } catch (e) { return unverified(`persisted-storage directory could not be read: ${(e as Error).message}`, reproduction); }
-      const planted = await req(host(`atrest-${randomBytes(3).toString("hex")}`), "POST", "/notes", { body: json({ text: note }) });
-      const broken = requireSetup(planted, "planting the marker through the classified notes field", reproduction);
-      if (broken) return broken;
-      let after = fingerprintStorage(persistDir);
-      if (!storageChanged(snap, after)) stale.push("notes");
-      snap = after;
-      if (withSecret) {
-        const secret = marker();
-        const t = await ownerTenant(ctx, "atrest-s", reproduction);
-        if ("error" in t && t.error) return t.error;
-        const owner = t as Extract<typeof t, { h: string }>;
-        snap = fingerprintStorage(persistDir); // after the owner's bootstrap and login, which also write
-        const stored = await req(owner.h, "POST", SECRET_STORE.path, { ...cookieWrite(owner.h, owner.token), body: json({ name: "probe-secret", value: secret }) });
-        const brokenSecret = requireSetup(stored, "storing the secret marker", reproduction);
-        if (brokenSecret) return brokenSecret;
-        after = fingerprintStorage(persistDir);
-        if (!storageChanged(snap, after)) stale.push("secrets");
-        markers.push(secret);
+      const cannotRead = (e: unknown) => unverified(`persisted-storage directory could not be read while checking that the writes landed: ${(e as Error).message}`, reproduction);
+      class Unreadable extends Error {}
+      const fp = () => { try { return fingerprintStorage(persistDir); } catch (e) { throw new Unreadable((e as Error).message); } };
+      /**
+       * The first write to a tenant may create its database file, which changes the directory whether or not the value was stored.
+       * So plant twice on the same tenant and require the SECOND plant to change the directory.
+       */
+      const plantTwice = async (label: string, firstMarker: string, plant: (marker: string) => Promise<Response>, what: string) => {
+        const first = await plant(firstMarker);
+        const broken = requireSetup(first, `planting the ${what} marker`, reproduction);
+        if (broken) return { error: broken };
+        const second = marker();
+        markers.push(second);
+        const before = fp();
+        const res = await plant(second);
+        const brokenSecond = requireSetup(res, `planting the second ${what} marker`, reproduction);
+        if (brokenSecond) return { error: brokenSecond };
+        if (!storageChanged(before, fp())) stale.push(label);
+        return {};
+      };
+      try {
+        const noteHost = host(`atrest-${randomBytes(3).toString("hex")}`);
+        const r1 = await plantTwice("notes", note, (m) => req(noteHost, "POST", "/notes", { body: json({ text: m }) }), "classified notes field");
+        if (r1.error) return r1.error;
+        if (withSecret) {
+          const t = await ownerTenant(ctx, "atrest-s", reproduction);
+          if ("error" in t && t.error) return t.error;
+          const owner = t as Extract<typeof t, { h: string }>;
+          const secret = marker();
+          markers.push(secret);
+          let n = 0;
+          const r2 = await plantTwice("secrets", secret, (m) => req(owner.h, "POST", SECRET_STORE.path, { ...cookieWrite(owner.h, owner.token), body: json({ name: `probe-secret-${n++}`, value: m }) }), "secret");
+          if (r2.error) return r2.error;
+        }
+      } catch (e) {
+        if (e instanceof Unreadable) return cannotRead(e); // the directory vanished or changed under us mid-run: unverified, never a thrown finding
+        throw e;
       }
       let scan;
       try {
@@ -878,8 +898,8 @@ export const probes: Probe[] = [
       const verdict = storageCanaryOracle(markers, scan);
       if (!verdict.passed) return { ...verdict, reproduction }; // a leak is a finding whatever else is missing
       if (scan.sqliteOpened === 0) return unverified(`no SQLite database under ${persistDir} after a successful write; wrong directory, or the target does not persist there, so the absence of the marker means nothing`, reproduction);
+      if (stale.length) return unverified(`the persisted-storage directory did not change after the second ${stale.join(" and the second ")} plant on the same tenant, so the write did not demonstrably reach the inspected storage (wrong directory, writes dropped or buffered); absence of the marker means nothing`, reproduction);
       if (scan.rowsScanned === 0) return unverified("SQLite databases found but they hold no rows after a successful write; the write did not reach the inspected storage", reproduction);
-      if (stale.length) return unverified(`the persisted-storage directory did not change after planting the ${stale.join(" and ")} marker, so the write did not demonstrably reach the inspected storage (wrong directory, or the target buffers writes); absence of the marker means nothing`, reproduction);
       if (scan.incomplete.length) return unverified(`the scan was incomplete (${scan.incomplete.join("; ")}); a pass would overstate what was inspected`, reproduction);
       if (!withSecret) return unverified(`only the notes half was checked: the manifest has no ${SECRET_STORE.method} ${SECRET_STORE.path}, so no secret-class field could be planted and CRYPTO-1 is unverified for the secret class`, reproduction);
       return { ...verdict, evidence: `${verdict.evidence}. Classified fields planted: notes, secrets. Not covered: any other classified column, or data written by routes this probe does not call.`, reproduction };
@@ -893,7 +913,7 @@ export const probes: Probe[] = [
     async run(ctx) {
       const { req, routes } = ctx;
       const m = marker();
-      const reproduction = `Store ${m} via POST /secrets {name, value} as an owner. Then, for every GET route in the committed route manifest (path parameters filled with the secret's name and with its id), request it as that owner and anonymously, and scan every response body and header for the marker. A parameter route must answer non-404 for some fill value, else unverified. Only GET/HEAD routes are read; write routes that might echo a secret are not exercised.`;
+      const reproduction = `Store ${m} via POST /secrets {name, value} as an owner. Then, for every GET route in the committed route manifest (path parameters filled with the secret's name and with its id), request it as that owner and anonymously, and scan every response body and header for the marker. A parameter route (:x, {x}, [x] or *) counts only if the owner gets a 2xx for some fill value, else unverified; if no GET route answers the owner, unverified. Only GET/HEAD routes are read; write routes that might echo a secret are not exercised.`;
       if (!routes) return unverified("no route manifest supplied (--route-manifest); the routes to read back through are unknown, so CRYPTO-5 is unverified", reproduction);
       if (!hasStoreRoute(routes)) return unverified(`the manifest has no ${SECRET_STORE.method} ${SECRET_STORE.path}; no way to plant a secret, so CRYPTO-5 is unverified on this target`, reproduction);
       const t = await ownerTenant(ctx, "wo", reproduction);
@@ -910,11 +930,14 @@ export const probes: Probe[] = [
       const checks: { name: string; ok: boolean; detail: string }[] = [{ name: `${SECRET_STORE.method} ${SECRET_STORE.path} response`, ok: !seen(stored), detail: "the store response echoes the secret" }];
       const unreadable: string[] = [];
       let exercised = 0;
+      let trulyExercised = 0;
       const unreached: string[] = [];
       for (const route of routes.filter((r) => r.method === "GET" || r.method === "HEAD")) {
-        const isParam = /:[A-Za-z_]\w*/.test(route.path);
-        const paths = isParam ? candidates.map((c) => route.path.replace(/:[A-Za-z_]\w*/g, encodeURIComponent(c))) : [route.path];
-        let answered = !isParam; // a parameter route only counts once some fill value got a real answer, not a 404
+        const isParam = PARAM.test(route.path);
+        const paths = isParam ? candidates.map((c) => route.path.replace(PARAM_ALL, () => encodeURIComponent(c))) : [route.path];
+        // A route counts as exercised only on the OWNER's answer. A parameter route needs a 2xx (the lookup ran); a plain route
+        // needs anything but 404/405 (the route is there). Anonymous requests are scanned for leaks but never prove coverage.
+        let answered = false;
         for (const path of paths) for (const [who, opts] of [["owner", withCookie(owner.token)], ["anonymous", {}]] as const) {
           const r = await req(owner.h, route.method, path, opts);
           exercised++;
@@ -922,12 +945,13 @@ export const probes: Probe[] = [
           if (r.status >= 500) unreadable.push(`${who} ${route.method} ${path}: HTTP ${r.status}`);
           checks.push({ name: `${who} ${route.method} ${path}`, ok: !seen(r), detail: `the stored secret was returned (HTTP ${r.status})` });
         }
-        if (!answered) unreached.push(`${route.method} ${route.path}`);
+        if (answered) trulyExercised++;
+        else if (isParam) unreached.push(`${route.method} ${route.path}`);
       }
       const verdict = specOracle(checks);
-      if (verdict.passed && exercised === 0) return unverified("the manifest has no GET routes to read back through", reproduction);
+      if (verdict.passed && trulyExercised === 0) return unverified(`no GET/HEAD route in the manifest answered the owner (all 404/405 or absent), so nothing was really read back (${exercised} request(s) sent)`, reproduction);
       if (verdict.passed && unreadable.length) return unverified(`read-back could not be completed, a server error hides what the route would return: ${unreadable.join("; ")}`, reproduction);
-      if (verdict.passed && unreached.length) return unverified(`parameter route(s) answered 404 for every fill value tried (the secret's name and id), so they were not really exercised: ${unreached.join(", ")}`, reproduction);
+      if (verdict.passed && unreached.length) return unverified(`parameter route(s) never gave the owner a 2xx for any fill value tried (the secret's name and id), so the lookup may not have run: ${unreached.join(", ")}`, reproduction);
       return { ...verdict, evidence: verdict.passed ? `secret absent from the store response and from ${exercised} read-back request(s). Limits: GET/HEAD routes in the manifest only; parameter routes filled with the secret's name and id only; write routes that might echo a secret were not exercised` : verdict.evidence, reproduction };
     },
   },

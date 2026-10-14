@@ -147,6 +147,7 @@ test("CRYPTO-5 never passes if a read-back route errors: a 500 hides what it wou
     if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
     if (req.url === "/secrets" && req.method === "POST") return ok(201);
     if (req.url === "/boom") return ok(500);
+    if (req.url === "/clean") return ok(200);
     return ok(404);
   });
   await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
@@ -253,10 +254,17 @@ test("symlinks: one to a file is scanned; one to a directory, a dangling one, an
   const outside = tmp();
   writeFileSync(join(outside, "real.bin"), `x${CANARY}x`);
   const dir = tmp();
-  symlinkSync(join(outside, "real.bin"), join(dir, "link-to-file"));
+  writeFileSync(join(dir, "inside.bin"), `y${CANARY}y`);
+  symlinkSync(join(dir, "inside.bin"), join(dir, "link-to-file"));
   let scan = scanStorage(dir, [CANARY]);
-  assert.ok(scan.hits.some((h) => h.file === "link-to-file"), "a link to a file is followed");
+  assert.ok(scan.hits.some((h) => h.file === "link-to-file"), "a link to a file inside the directory is followed");
   assert.deepEqual(scan.incomplete, []);
+  const escaping = tmp();
+  symlinkSync(join(outside, "real.bin"), join(escaping, "escape"));
+  scan = scanStorage(escaping, [CANARY]);
+  assert.deepEqual(scan.hits, [], "a link out of the directory is never read");
+  assert.ok(scan.incomplete.some((m) => m.startsWith("escape:") && /outside/.test(m)), scan.incomplete.join("|"));
+  assert.equal(fingerprintStorage(escaping).size, 0, "nor fingerprinted");
   const dir2 = tmp();
   symlinkSync(outside, join(dir2, "link-to-dir"));
   symlinkSync(join(outside, "nowhere"), join(dir2, "dangling"));
@@ -299,7 +307,7 @@ test("CRYPTO-1 is unverified when the plant demonstrably did not reach the inspe
   const fx = await startFixture([]);
   try {
     const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: other, routes: fx.env.routes });
-    assert.match(r?.unverified ?? "", /did not change after planting/);
+    assert.match(r?.unverified ?? "", /did not change after the second notes/);
     assert.equal(r?.passed, false);
   } finally {
     await fx.stop();
@@ -323,6 +331,7 @@ test("CRYPTO-1 without POST /secrets in the manifest is unverified for the secre
     const [r] = await runProbes(leaky.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: leaky.env.persistDir, routes });
     assert.equal(r?.unverified, undefined);
     assert.equal(r?.passed, false);
+    assert.match(r?.evidence ?? "", /plaintext found in storage/);
   } finally {
     await leaky.stop();
   }
@@ -336,7 +345,7 @@ test("CRYPTO-5: a parameter route that answers 404 to every fill value was not e
     if (req.url === "/auth/bootstrap") return ok(201);
     if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
     if (req.url === "/secrets" && req.method === "POST") return ok(201);
-    if (req.url === "/answered/probe-secret" ) return ok(200);
+    if (req.url === "/clean") return ok(200);
     return ok(404);
   });
   await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
@@ -352,4 +361,107 @@ test("CRYPTO-5: a parameter route that answers 404 to every fill value was not e
   } finally {
     await new Promise<void>((r) => { stub.close(() => r()); stub.closeAllConnections(); });
   }
+});
+
+/** A stub target for CRYPTO-5: bootstrap, login and the secret store succeed; `routes` decides every other answer by (path, has-cookie). */
+async function stubTarget(answer: (path: string, cookie: boolean) => number) {
+  const { createServer } = await import("node:http");
+  const server = createServer((req, res) => {
+    req.resume();
+    const ok = (status: number, extra: Record<string, string> = {}) => { res.writeHead(status, { "content-type": "application/json", ...extra }); res.end("{}"); };
+    if (req.url === "/auth/bootstrap") return ok(201);
+    if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
+    if (req.url === "/secrets" && req.method === "POST") return ok(201);
+    return ok(answer(req.url ?? "", Boolean(req.headers.cookie)));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  return { url: new URL(`http://127.0.0.1:${(server.address() as { port: number }).port}`), stop: () => new Promise<void>((r) => { server.close(() => r()); server.closeAllConnections(); }) };
+}
+const STORE = { method: "POST", path: "/secrets" };
+
+test("CRYPTO-5 coverage: only the owner's answer counts, a parameter route needs a 2xx, and {x} [x] * are parameters too", async () => {
+  const cases: { name: string; answer: (p: string, c: boolean) => number; routes: { method: string; path: string }[]; unverified: RegExp | null }[] = [
+    { name: "param route: owner 404, anonymous 401", answer: (p, c) => (p.startsWith("/t/") ? (c ? 404 : 401) : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: /GET \/t\/:id/ },
+    { name: "param route: owner 403, anonymous 200", answer: (p, c) => (p.startsWith("/t/") ? (c ? 403 : 200) : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: /GET \/t\/:id/ },
+    { name: "{id} form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/{id}" }], unverified: /GET \/t\/\{id\}/ },
+    { name: "[id] form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/[id]" }], unverified: /GET \/t\/\[id\]/ },
+    { name: "* form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/*" }], unverified: /GET \/t\/\*/ },
+    { name: "every GET in the manifest answers 404", answer: () => 404, routes: [STORE, { method: "GET", path: "/a" }, { method: "GET", path: "/b" }], unverified: /nothing was really read back/ },
+    { name: "positive control: :id answered 200 for the owner", answer: () => 200, routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: null },
+    { name: "positive control: {id} answered 200", answer: () => 200, routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/{id}" }], unverified: null },
+  ];
+  for (const c of cases) {
+    const stub = await stubTarget(c.answer);
+    try {
+      const [r] = await runProbes(stub.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: c.routes });
+      if (c.unverified) { assert.match(r?.unverified ?? "", c.unverified, c.name); assert.equal(r?.passed, false, c.name); }
+      else { assert.equal(r?.unverified, undefined, `${c.name}: ${r?.evidence}`); assert.equal(r?.passed, true, c.name); }
+    } finally {
+      await stub.stop();
+    }
+  }
+});
+
+test("CRYPTO-1: a write that creates the tenant database but stores nothing is UNVERIFIED on the second plant, notes and secrets separately", async () => {
+  for (const [bug, which, other] of [["notes-dropped", "notes", "secrets"], ["secrets-dropped", "secrets", "notes"]] as const) {
+    const fx = await startFixture([bug]);
+    try {
+      const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+      assert.equal(r?.passed, false, bug);
+      assert.match(r?.unverified ?? "", new RegExp(`second ${which} plant`), bug);
+      assert.doesNotMatch(r?.unverified ?? "", new RegExp(`second ${other} plant`), bug);
+    } finally {
+      await fx.stop();
+    }
+  }
+});
+
+test("CRYPTO-1: the persist directory vanishing mid-run is UNVERIFIED, not a thrown error", async () => {
+  const { createServer } = await import("node:http");
+  const { rmSync } = await import("node:fs");
+  const dir = tmp();
+  writeFileSync(join(dir, "seed"), "x");
+  const stub = createServer((req, res) => {
+    req.resume();
+    if (req.method === "POST" && req.url === "/notes") rmSync(dir, { recursive: true, force: true });
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
+  try {
+    const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
+    const results = await runProbes(url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: dir });
+    assert.match(results[0]?.unverified ?? "", /could not be read/);
+    assert.doesNotMatch(results[0]?.evidence ?? "", /probe error/);
+  } finally {
+    await new Promise<void>((r) => { stub.close(() => r()); stub.closeAllConnections(); });
+  }
+});
+
+test("a live WAL-mode database (-wal and -shm present) is scanned without error and without changing any existing byte", () => {
+  const dir = tmp();
+  const db = new DatabaseSync(join(dir, "live.sqlite"));
+  db.exec(`pragma journal_mode = wal; create table n (v text); insert into n values ('${CANARY}')`);
+  const names = readdirSync(dir);
+  assert.ok(names.includes("live.sqlite-wal") && names.includes("live.sqlite-shm"), names.join());
+  const bytes = (f: string) => readFileSync(join(dir, f));
+  const before = Object.fromEntries(names.filter((f) => !f.endsWith("-shm")).map((f) => [f, bytes(f)]));
+  const scan = scanStorage(dir, [CANARY]);
+  assert.deepEqual(scan.incomplete, []);
+  assert.ok(scan.hits.some((h) => h.layer === "column" && h.where === "n.v"), "committed WAL content is visible to the column scan");
+  for (const [f, b] of Object.entries(before)) assert.ok(bytes(f).equals(b), `${f} changed`);
+  assert.deepEqual(readdirSync(dir).sort(), names.sort());
+  db.exec("insert into n values ('still writable by the owner')"); // the scan did not lock the live writer out
+  db.close();
+});
+
+test("fixture cleanup: stopping a fixture that already died does not hang and removes its temp directory", async () => {
+  const fx = await startFixture([]);
+  const dir = fx.env.persistDir!;
+  const pid = Number((await new Promise<string>((r) => { const c = spawn("pgrep", ["-f", `fixture/server.ts`]); let o = ""; c.stdout.on("data", (d: Buffer) => (o += d)); c.on("close", () => r(o.trim().split("\n").pop() ?? "")); })));
+  assert.ok(pid > 0);
+  process.kill(pid, "SIGKILL");
+  await new Promise((r) => setTimeout(r, 300));
+  await fx.stop();
+  assert.equal(existsSync(dir), false);
 });
