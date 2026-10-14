@@ -1,0 +1,178 @@
+[
+  {
+    "method": "DELETE",
+    "path": "/api-keys/:id",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api-keys",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api-keys",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/auth/bootstrap",
+    "access": {
+      "kind": "public",
+      "reason": "fixture route"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/auth/login",
+    "access": {
+      "kind": "public",
+      "reason": "fixture route"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/auth/logout",
+    "access": {
+      "kind": "role",
+      "role": "member"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/notes",
+    "access": {
+      "kind": "public",
+      "reason": "fixture route"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/notes",
+    "access": {
+      "kind": "public",
+      "reason": "fixture route"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/plan",
+    "access": {
+      "kind": "public",
+      "reason": "fixture route"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/private/admin",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/private/member",
+    "access": {
+      "kind": "role",
+      "role": "member"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/private/owner",
+    "access": {
+      "kind": "role",
+      "role": "owner"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/secrets",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/secrets",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/secrets/:name",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/summary",
+    "access": {
+      "kind": "public",
+      "reason": "fixture route"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/users",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/users",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "DELETE",
+    "path": "/users/:id",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/users/:id/role",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/webhooks/billing",
+    "access": {
+      "kind": "public",
+      "reason": "fixture route"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/whoami",
+    "access": {
+      "kind": "public",
+      "reason": "fixture route"
+    }
+  }
+]

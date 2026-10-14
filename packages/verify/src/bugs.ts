@@ -38,4 +38,10 @@ export const seededBugs: SeededBug[] = [
   { id: "admin-user-create-refused", description: "POST /users refuses every admin with 403, so an admin's denials on role changes prove nothing (the positive control must catch this)", probeIds: ["role-change-authority"] },
   { id: "listing-leaks-digest", description: "GET /users carries a neutrally named field (digest) holding a 64-hex-digit string", probeIds: ["listings-hide-secrets"] },
   { id: "listing-leaks-token", description: "GET /api-keys carries a neutrally named field (x) holding a 43-character base64url token", probeIds: ["listings-hide-secrets"] },
+  { id: "notes-plaintext-at-rest", description: "The classified notes.text column is stored as plaintext instead of a sealed value", probeIds: ["storage-canary-at-rest"] },
+  { id: "secret-plaintext-at-rest", description: "A stored tenant secret is written to its column as plaintext instead of a sealed value", probeIds: ["storage-canary-at-rest"] },
+  { id: "plaintext-in-freed-page", description: "Notes are sealed in their column, but the plaintext is also written to a scratch row that is then deleted: no column holds it, yet it survives in database pages and the WAL (only the raw byte scan sees it)", probeIds: ["storage-canary-at-rest"] },
+  { id: "secret-readable-via-list", description: "GET /secrets returns each stored secret's value", probeIds: ["secret-write-only-readback"] },
+  { id: "secret-readable-via-param-route", description: "GET /secrets/:name returns the stored secret's value (found only by filling the path parameter)", probeIds: ["secret-write-only-readback"] },
+  { id: "secret-echoed-on-store", description: "POST /secrets echoes the stored value in its response", probeIds: ["secret-write-only-readback"] },
 ];

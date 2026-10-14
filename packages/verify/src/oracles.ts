@@ -1,5 +1,6 @@
 // The five oracles are deterministic and boring.
 import type { Response } from "./http.ts";
+import type { StorageScan } from "./inspector.ts";
 
 export interface Verdict {
   /** Never true for a skipped probe: a probe that did not run verified nothing. Consumers must check `skipped` before reading `passed` as a failure. */
@@ -7,6 +8,11 @@ export interface Verdict {
   evidence: string;
   /** Third outcome, "not applicable": the reason the target does not have the feature this probe exercises. Not a pass, not a finding. */
   skipped?: string;
+  /**
+   * Fourth outcome, "unverified": the target may well have the feature, but this run had no means to check it (no storage
+   * directory, no route manifest). Never a pass and never a finding; a run that carries one is not green.
+   */
+  unverified?: string;
 }
 
 /** Canary: a marker planted in tenant A must not appear anywhere in tenant B's world. */
@@ -15,6 +21,14 @@ export function canaryOracle(marker: string, observations: { where: string; resp
   return leaks.length
     ? { passed: false, evidence: `marker ${marker} found in: ${leaks.map((l) => `${l.where} (HTTP ${l.response.status})`).join(", ")}` }
     : { passed: true, evidence: "marker absent from all observed responses" };
+}
+
+/** Canary at rest: a marker the app was given must appear nowhere in the persisted storage, in any column or any raw byte. */
+export function storageCanaryOracle(markers: readonly string[], scan: StorageScan): Verdict {
+  const hits = scan.hits.filter((h) => markers.includes(h.marker));
+  return hits.length
+    ? { passed: false, evidence: `plaintext found in storage: ${hits.map((h) => `${h.layer} ${h.file} ${h.where}`).join(", ")}` }
+    : { passed: true, evidence: `marker absent from ${scan.filesScanned} file(s), ${scan.tablesScanned} table(s), ${scan.rowsScanned} row(s) and all raw bytes` };
 }
 
 /** Spec: the rule says what must happen; the response either matches or not. */

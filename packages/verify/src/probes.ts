@@ -1,9 +1,30 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { Oracle } from "@kalahroudi/bulkhead-spec";
 import type { Requester, Response } from "./http.ts";
-import { canaryOracle, differentialOracle, metamorphicOracle, roleDifferentialOracle, specOracle, type Verdict } from "./oracles.ts";
+import { scanStorage } from "./inspector.ts";
+import { canaryOracle, differentialOracle, metamorphicOracle, roleDifferentialOracle, specOracle, storageCanaryOracle, type Verdict } from "./oracles.ts";
 
-export interface Context {
+/** One entry of the committed route manifest (ROUTE-2). Verify reads the JSON file; it never imports the app that wrote it. */
+export interface ManifestRoute {
+  method: string;
+  path: string;
+}
+
+/** What a run was given besides the HTTP address. Anything absent makes the probes that need it report "unverified". */
+export interface TargetEnv {
+  /** Local persisted-storage directory (workerd --persist-to) of the target. Only a local target has one (DR-0010 choice 7). */
+  persistDir?: string;
+  /** The committed route manifest of the target. */
+  routes?: ManifestRoute[];
+}
+
+export function parseManifest(text: string): ManifestRoute[] {
+  const data: unknown = JSON.parse(text);
+  if (!Array.isArray(data) || !data.every((r) => r && typeof r.method === "string" && typeof r.path === "string")) throw new Error("route manifest must be a JSON array of {method, path, ...}");
+  return data.map((r) => ({ method: String(r.method).toUpperCase(), path: String(r.path) }));
+}
+
+export interface Context extends TargetEnv {
   req: Requester;
   /** Throwaway tenant hostnames. Tenant identity comes from the hostname only. */
   host: (tenant: string) => string;
@@ -45,6 +66,15 @@ const cookieWrite = (host: string, token: string) => ({ headers: { cookie: `${SE
 /** Third outcome: the target does not have the feature this probe exercises. Not a pass and never a finding. */
 const skip = (reason: string, reproduction: string) => ({ passed: false, evidence: reason, skipped: reason, reproduction });
 const fail = (evidence: string, reproduction: string) => ({ passed: false, evidence, reproduction });
+/** Fourth outcome: the run had no means to check this (no storage dir, no manifest). Not a pass, not a finding, and the run is not green. */
+const unverified = (reason: string, reproduction: string) => ({ passed: false, evidence: reason, unverified: reason, reproduction });
+
+/**
+ * The tenant-secret store route the CRYPTO-5 probe plants through: POST /secrets {name, value}. This is a verify-side
+ * convention that DR-0010 step (g) has not fixed yet (see the report); a target whose manifest lacks it is "unverified".
+ */
+const SECRET_STORE = { method: "POST", path: "/secrets" } as const;
+const hasStoreRoute = (routes: ManifestRoute[] | undefined) => !!routes?.some((r) => r.method === SECRET_STORE.method && r.path === SECRET_STORE.path);
 
 /** A throwaway tenant with an owner who is signed in. Every step must succeed or the probe fails (setup is not a pass). */
 async function ownerTenant({ req, host, bootstrapToken }: Context, name: string, reproduction: string) {
@@ -803,6 +833,84 @@ export const probes: Probe[] = [
         ]),
         reproduction,
       };
+    },
+  },
+  {
+    id: "storage-canary-at-rest",
+    ruleId: "CRYPTO-1",
+    scenario: "crypto/no-plaintext-at-rest",
+    oracle: "canary",
+    async run(ctx) {
+      const { req, host, persistDir } = ctx;
+      const note = marker();
+      const withSecret = hasStoreRoute(ctx.routes);
+      const reproduction = `Plant ${note} via POST /notes (Host: ${host("atrest-n")}, a classified field)${withSecret ? " and a second marker via POST /secrets as an owner" : ""}. Then open every SQLite file under the persisted-storage directory read-only and scan every table cell and every raw byte (pages, WAL) for the markers.`;
+      if (!persistDir) return unverified("no persisted-storage directory supplied (--persist-dir); a storage read is impossible over HTTP, so CRYPTO-1 is unverified on this target", reproduction);
+      const markers = [note];
+      const planted = await req(host(`atrest-${randomBytes(3).toString("hex")}`), "POST", "/notes", { body: json({ text: note }) });
+      const broken = requireSetup(planted, "planting the marker through the classified notes field", reproduction);
+      if (broken) return broken;
+      if (withSecret) {
+        const secret = marker();
+        const t = await ownerTenant(ctx, "atrest-s", reproduction);
+        if ("error" in t && t.error) return t.error;
+        const owner = t as Extract<typeof t, { h: string }>;
+        const stored = await req(owner.h, "POST", SECRET_STORE.path, { ...cookieWrite(owner.h, owner.token), body: json({ name: "probe-secret", value: secret }) });
+        const brokenSecret = requireSetup(stored, "storing the secret marker", reproduction);
+        if (brokenSecret) return brokenSecret;
+        markers.push(secret);
+      }
+      let scan;
+      try {
+        scan = scanStorage(persistDir, markers);
+      } catch (e) {
+        return unverified(`persisted-storage directory could not be read: ${(e as Error).message}`, reproduction);
+      }
+      const verdict = storageCanaryOracle(markers, scan);
+      if (verdict.passed && scan.sqliteOpened === 0) return unverified(`no SQLite database under ${persistDir} after a successful write; wrong directory, or the target does not persist there, so the absence of the marker means nothing`, reproduction);
+      if (verdict.passed && scan.rowsScanned === 0) return unverified("SQLite databases found but they hold no rows after a successful write; the write did not reach the inspected storage", reproduction);
+      if (verdict.passed && scan.incomplete.length) return unverified(`the column scan was incomplete (${scan.incomplete.join("; ")}); only the raw byte scan completed, which is not enough to report a pass`, reproduction);
+      return { ...verdict, reproduction };
+    },
+  },
+  {
+    id: "secret-write-only-readback",
+    ruleId: "CRYPTO-5",
+    scenario: "crypto/tenant-secrets-write-only",
+    oracle: "spec",
+    async run(ctx) {
+      const { req, routes } = ctx;
+      const m = marker();
+      const reproduction = `Store ${m} via POST /secrets {name, value} as an owner. Then, for every GET route in the committed route manifest (path parameters filled with the secret's name and with its id), request it as that owner and anonymously, and scan every response body and header for the marker.`;
+      if (!routes) return unverified("no route manifest supplied (--route-manifest); the routes to read back through are unknown, so CRYPTO-5 is unverified", reproduction);
+      if (!hasStoreRoute(routes)) return unverified(`the manifest has no ${SECRET_STORE.method} ${SECRET_STORE.path}; no way to plant a secret, so CRYPTO-5 is unverified on this target`, reproduction);
+      const t = await ownerTenant(ctx, "wo", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const owner = t as Extract<typeof t, { h: string }>;
+      const name = `probe-secret-${randomBytes(3).toString("hex")}`;
+      const stored = await req(owner.h, "POST", SECRET_STORE.path, { ...cookieWrite(owner.h, owner.token), body: json({ name, value: m }) });
+      const brokenStore = requireSetup(stored, "storing the secret", reproduction);
+      if (brokenStore) return brokenStore;
+      let id: string | undefined;
+      try { const b = JSON.parse(stored.body) as { id?: unknown }; if (typeof b.id === "string") id = b.id; } catch { /* the store response need not be JSON */ }
+      const candidates = [name, ...(id ? [id] : [])];
+      const seen = (r: Response) => r.body.includes(m) || JSON.stringify(r.headers).includes(m);
+      const checks: { name: string; ok: boolean; detail: string }[] = [{ name: `${SECRET_STORE.method} ${SECRET_STORE.path} response`, ok: !seen(stored), detail: "the store response echoes the secret" }];
+      const unreadable: string[] = [];
+      let exercised = 0;
+      for (const route of routes.filter((r) => r.method === "GET" || r.method === "HEAD")) {
+        const paths = /:[A-Za-z_]\w*/.test(route.path) ? candidates.map((c) => route.path.replace(/:[A-Za-z_]\w*/g, encodeURIComponent(c))) : [route.path];
+        for (const path of paths) for (const [who, opts] of [["owner", withCookie(owner.token)], ["anonymous", {}]] as const) {
+          const r = await req(owner.h, route.method, path, opts);
+          exercised++;
+          if (r.status >= 500) unreadable.push(`${who} ${route.method} ${path}: HTTP ${r.status}`);
+          checks.push({ name: `${who} ${route.method} ${path}`, ok: !seen(r), detail: `the stored secret was returned (HTTP ${r.status})` });
+        }
+      }
+      const verdict = specOracle(checks);
+      if (verdict.passed && exercised === 0) return unverified("the manifest has no GET routes to read back through", reproduction);
+      if (verdict.passed && unreadable.length) return unverified(`read-back could not be completed, a server error hides what the route would return: ${unreadable.join("; ")}`, reproduction);
+      return { ...verdict, evidence: verdict.passed ? `secret absent from the store response and from ${exercised} read-back request(s)` : verdict.evidence, reproduction };
     },
   },
 ];
