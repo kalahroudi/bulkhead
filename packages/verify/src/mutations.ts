@@ -35,7 +35,7 @@ export interface Mutation {
  */
 export const UNMUTATABLE: Record<string, string> = {
   "forged-signature": "BILL-2: the demo Worker has no billing routes, so the kernel gate skips this probe; billing arrives in Phase 5",
-  "storage-canary-at-rest": "CRYPTO-1 (DR-0010 step a): the probe is built before the code it checks. packages/core/src/crypto/ is empty, the demo has no classified field, so there is no line to break yet. Recorded exemption; the sealing mutation lands with step (c), and until then the fixture seeded bugs are the only proof this probe can fail",
+  "storage-canary-at-rest": "CRYPTO-1 (DR-0010 step a): the probe is built before the code it checks. packages/core/src/crypto/ is empty, the demo has no classified field, so there is no line to break yet. Recorded exemption; the sealing code lands in the crypto port (step b) and its enforcement in step (c), where the mutation entries arrive, and until then the fixture seeded bugs are the only proof this probe can fail",
   "secret-write-only-readback": "CRYPTO-5 (DR-0010 step a): the probe is built before the code it checks. The demo has no secret store route (step g adds POST /secrets and the tenant_secrets table), so there is no line to break yet. Recorded exemption; the mutation lands with step (g), and until then the fixture seeded bugs are the only proof this probe can fail",
 };
 

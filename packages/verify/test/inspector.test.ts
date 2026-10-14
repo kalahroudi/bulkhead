@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { openReadOnly, scanStorage } from "../src/inspector.ts";
+import { fingerprintStorage, openReadOnly, scanStorage, storageChanged } from "../src/inspector.ts";
 import { FIXTURE_BOOTSTRAP_TOKEN, runProbes, selfCheckFailureIds, startFixture, verifyTarget } from "../src/run.ts";
 import { EventLog } from "../src/eventlog.ts";
 import { probes } from "../src/probes.ts";
@@ -247,4 +247,109 @@ test("the self-check counts an unverified probe as a mismatch, never as nothing"
   assert.deepEqual(selfCheckFailureIds([mk({ skipped: "n/a" })]), []);
   assert.deepEqual(selfCheckFailureIds([mk({})]), ["storage-canary-at-rest"]);
   assert.deepEqual(selfCheckFailureIds([mk({ passed: true })]), []);
+});
+
+test("symlinks: one to a file is scanned; one to a directory, a dangling one, and a FIFO are reported incomplete, never skipped silently", async () => {
+  const outside = tmp();
+  writeFileSync(join(outside, "real.bin"), `x${CANARY}x`);
+  const dir = tmp();
+  symlinkSync(join(outside, "real.bin"), join(dir, "link-to-file"));
+  let scan = scanStorage(dir, [CANARY]);
+  assert.ok(scan.hits.some((h) => h.file === "link-to-file"), "a link to a file is followed");
+  assert.deepEqual(scan.incomplete, []);
+  const dir2 = tmp();
+  symlinkSync(outside, join(dir2, "link-to-dir"));
+  symlinkSync(join(outside, "nowhere"), join(dir2, "dangling"));
+  const { spawnSync } = await import("node:child_process");
+  spawnSync("mkfifo", [join(dir2, "fifo")]);
+  scan = scanStorage(dir2, [CANARY]);
+  assert.ok(scan.incomplete.some((m) => m.startsWith("link-to-dir:")), scan.incomplete.join("|"));
+  assert.ok(scan.incomplete.some((m) => m.startsWith("dangling:")));
+  assert.ok(scan.incomplete.some((m) => m.startsWith("fifo:")));
+});
+
+test("a storage directory with an unscannable entry can never yield a CRYPTO-1 pass", async () => {
+  const fx = await startFixture([]);
+  try {
+    symlinkSync(tmp(), join(fx.env.persistDir!, "stray-link"));
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.match(r?.unverified ?? "", /scan was incomplete.*stray-link/);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("fingerprint detects growth, rewrite and new files", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "a"), "1");
+  const a = fingerprintStorage(dir);
+  assert.equal(storageChanged(a, fingerprintStorage(dir)), false);
+  writeFileSync(join(dir, "a"), "12");
+  assert.equal(storageChanged(a, fingerprintStorage(dir)), true);
+  const b = fingerprintStorage(dir);
+  writeFileSync(join(dir, "b"), "");
+  assert.equal(storageChanged(b, fingerprintStorage(dir)), true);
+});
+
+test("CRYPTO-1 is unverified when the plant demonstrably did not reach the inspected directory, even if that directory holds other rows", async () => {
+  const other = tmp();
+  const db = new DatabaseSync(join(other, "someone-else.sqlite"));
+  db.exec("create table t (v text); insert into t values ('unrelated row')");
+  db.close();
+  const fx = await startFixture([]);
+  try {
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: other, routes: fx.env.routes });
+    assert.match(r?.unverified ?? "", /did not change after planting/);
+    assert.equal(r?.passed, false);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("CRYPTO-1 without POST /secrets in the manifest is unverified for the secret class, but a notes leak is still a finding", async () => {
+  const noSecrets = (await import("node:fs")).readFileSync(new URL("../fixture/route-manifest.json", import.meta.url), "utf8");
+  const routes = (JSON.parse(noSecrets) as { method: string; path: string }[]).filter((r) => !r.path.startsWith("/secrets"));
+  const clean = await startFixture([]);
+  try {
+    const [r] = await runProbes(clean.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: clean.env.persistDir, routes });
+    assert.match(r?.unverified ?? "", /only the notes half was checked/);
+    const [noManifest] = await runProbes(clean.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: clean.env.persistDir });
+    assert.match(noManifest?.unverified ?? "", /only the notes half was checked/);
+  } finally {
+    await clean.stop();
+  }
+  const leaky = await startFixture(["notes-plaintext-at-rest"]);
+  try {
+    const [r] = await runProbes(leaky.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: leaky.env.persistDir, routes });
+    assert.equal(r?.unverified, undefined);
+    assert.equal(r?.passed, false);
+  } finally {
+    await leaky.stop();
+  }
+});
+
+test("CRYPTO-5: a parameter route that answers 404 to every fill value was not exercised, so the probe is unverified and names it", async () => {
+  const { createServer } = await import("node:http");
+  const stub = createServer((req, res) => {
+    req.resume();
+    const ok = (status: number, extra: Record<string, string> = {}) => { res.writeHead(status, { "content-type": "application/json", ...extra }); res.end("{}"); };
+    if (req.url === "/auth/bootstrap") return ok(201);
+    if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
+    if (req.url === "/secrets" && req.method === "POST") return ok(201);
+    if (req.url === "/answered/probe-secret" ) return ok(200);
+    return ok(404);
+  });
+  await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
+  const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
+  try {
+    const base = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/clean" }];
+    const [r] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...base, { method: "GET", path: "/secrets/:name" }] });
+    assert.equal(r?.passed, false);
+    assert.match(r?.unverified ?? "", /GET \/secrets\/:name/);
+    const [ok] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: base });
+    assert.equal(ok?.passed, true, "control: without the 404-only parameter route it passes");
+    assert.match(ok?.evidence ?? "", /GET\/HEAD routes in the manifest only/);
+  } finally {
+    await new Promise<void>((r) => { stub.close(() => r()); stub.closeAllConnections(); });
+  }
 });

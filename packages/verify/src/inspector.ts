@@ -28,14 +28,41 @@ export interface StorageScan {
 
 const SQLITE_MAGIC = Buffer.from("SQLite format 3\0");
 
-function filesUnder(dir: string, rel = ""): string[] {
+/**
+ * Every regular file under `dir`. A symlink is resolved with stat and scanned when it points at a file; anything the walk
+ * cannot scan (a link to a directory or to nowhere, a socket, a FIFO) is recorded in `incomplete`, never skipped silently.
+ */
+function filesUnder(dir: string, incomplete: string[], rel = ""): string[] {
   const out: string[] = [];
   for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
     const p = rel ? `${rel}/${e.name}` : e.name;
-    if (e.isDirectory()) out.push(...filesUnder(dir, p));
+    if (e.isDirectory()) out.push(...filesUnder(dir, incomplete, p));
     else if (e.isFile()) out.push(p);
+    else if (e.isSymbolicLink()) {
+      try {
+        if (statSync(join(dir, p)).isFile()) out.push(p);
+        else incomplete.push(`${p}: symlink does not point at a regular file, not scanned`);
+      } catch {
+        incomplete.push(`${p}: dangling symlink, not scanned`);
+      }
+    } else incomplete.push(`${p}: special file, not scanned`);
   }
   return out.sort();
+}
+
+/** Size and mtime of every file, to tell whether anything on disk changed between two moments. */
+export function fingerprintStorage(dir: string): Map<string, string> {
+  const incomplete: string[] = [];
+  const m = new Map<string, string>();
+  for (const f of filesUnder(dir, incomplete)) { const st = statSync(join(dir, f)); m.set(f, `${st.size}:${st.mtimeMs}`); }
+  return m;
+}
+
+/** True when a file appeared, vanished, grew or was rewritten between the two fingerprints. */
+export function storageChanged(before: Map<string, string>, after: Map<string, string>): boolean {
+  if (before.size !== after.size) return true;
+  for (const [f, v] of after) if (before.get(f) !== v) return true;
+  return false;
 }
 
 function isSqlite(path: string): boolean {
@@ -69,7 +96,7 @@ export function scanStorage(dir: string, markers: readonly string[]): StorageSca
   if (!statSync(dir).isDirectory()) throw new Error(`${dir} is not a directory`);
   const needles = markers.map((m) => ({ m, b: Buffer.from(m, "utf8") }));
   const scan: StorageScan = { filesScanned: 0, sqliteOpened: 0, tablesScanned: 0, rowsScanned: 0, hits: [], incomplete: [] };
-  for (const file of filesUnder(dir)) {
+  for (const file of filesUnder(dir, scan.incomplete)) {
     const path = join(dir, file);
     const bytes = readFileSync(path);
     scan.filesScanned++;
