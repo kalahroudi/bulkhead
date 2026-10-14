@@ -91,7 +91,7 @@ export interface SelfCheck {
 
 /** Failing probe ids of a self-check run. An unverified probe surfaces as `UNVERIFIED:<id>`: the oracle could not be exercised, which must be a mismatch, never dropped. */
 export function selfCheckFailureIds(results: readonly ProbeResult[]): string[] {
-  return results.filter((r) => (!r.passed && r.skipped === undefined) || false).map((r) => (r.unverified !== undefined ? `UNVERIFIED:${r.probe.id}` : r.probe.id)).sort();
+  return results.filter((r) => (!r.passed && r.skipped === undefined) || r.unverified !== undefined).map((r) => (r.unverified !== undefined ? `UNVERIFIED:${r.probe.id}` : r.probe.id)).sort();
 }
 
 async function failuresAgainst(bugs: string[]): Promise<string[]> {
