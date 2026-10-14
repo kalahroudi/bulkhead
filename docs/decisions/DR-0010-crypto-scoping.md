@@ -1,6 +1,6 @@
 # DR-0010: Phase 4 crypto scoping (CRYPTO-1..5): design, order of work and open questions
 
-- Status: proposed (scoping only: no crypto code is written until the owner answers the open questions and accepts this record)
+- Status: proposed (owner answered all six open questions in session on 2026-10-14; the owner has not yet marked this record accepted, so no crypto work starts)
 - Date: 2026-10-13
 - Rules: CRYPTO-1, CRYPTO-2, CRYPTO-3, CRYPTO-4, CRYPTO-5, BOOT-1
 
@@ -35,6 +35,17 @@ Proposed design, each choice with a recommendation. The owner may override any o
 4. Data-key cache: 60 seconds (recommended), shorter at a per-request D1 read, or longer?
 5. Demo coverage: classify the demo's `notes.text` as `sensitive` and add a write-only `tenant_secrets` table so every rule has something to bite on (recommended), or keep the demo unchanged and use a dedicated fixture app?
 6. Master-key custody for production: Worker secret (recommended for now) or an external KMS later as its own record?
+
+## Owner answers (2026-10-14)
+The owner approved the recommended answer to all six questions:
+1. Nonces: counter in the tenant's Durable Object.
+2. AAD: the spec's three fields (tenant, table, field) plus key version; no row id, no spec amendment.
+3. Inspector: local persisted files only; staging and production report CRYPTO-1 and CRYPTO-3 as unverified.
+4. Data-key cache: 60 seconds.
+5. Demo coverage: extend the existing demo (`notes.text` as `sensitive`, a write-only `tenant_secrets` table); no separate fixture app.
+6. Master-key custody: Worker secret now; an external KMS would be its own record.
+
+Order of work agreed in session: this record's crypto steps (a) to (g) first, then the Better Auth spike (DR-0011), then making the verifier usable against an app other than the demo. Each needs its own go-ahead if the scope changes.
 
 ## Consequences
 Accepting this record unlocks step (a) only: the inspector, fixture and failing probes, with no implementation. Each later step is its own PR with the full gate and an independent review. CRYPTO rules stay `proposed` throughout; no attestation exists until Phase 7.
