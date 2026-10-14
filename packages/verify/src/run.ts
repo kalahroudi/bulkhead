@@ -89,11 +89,15 @@ export interface SelfCheck {
   seededBugsTotal: number;
 }
 
+/** Failing probe ids of a self-check run. An unverified probe surfaces as `UNVERIFIED:<id>`: the oracle could not be exercised, which must be a mismatch, never dropped. */
+export function selfCheckFailureIds(results: readonly ProbeResult[]): string[] {
+  return results.filter((r) => (!r.passed && r.skipped === undefined) || false).map((r) => (r.unverified !== undefined ? `UNVERIFIED:${r.probe.id}` : r.probe.id)).sort();
+}
+
 async function failuresAgainst(bugs: string[]): Promise<string[]> {
   const fx = await startFixture(bugs);
   try {
-    // An unverified probe in the self-check means the oracle could not be exercised here: it must surface as a mismatch, never be dropped.
-    return (await runProbes(fx.url, probes, FIXTURE_BOOTSTRAP_TOKEN, fx.env)).filter((r) => (!r.passed && r.skipped === undefined) || r.unverified !== undefined).map((r) => (r.unverified !== undefined ? `UNVERIFIED:${r.probe.id}` : r.probe.id)).sort();
+    return selfCheckFailureIds(await runProbes(fx.url, probes, FIXTURE_BOOTSTRAP_TOKEN, fx.env));
   } finally {
     await fx.stop();
   }

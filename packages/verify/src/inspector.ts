@@ -98,7 +98,7 @@ export function scanStorage(dir: string, markers: readonly string[]): StorageSca
         }
       }
     } catch (e) {
-      void (`${file}: SQLite open failed: ${(e as Error).message}`);
+      scan.incomplete.push(`${file}: SQLite open failed: ${(e as Error).message}`);
     } finally {
       db?.close();
     }

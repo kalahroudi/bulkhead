@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openReadOnly, scanStorage } from "../src/inspector.ts";
-import { FIXTURE_BOOTSTRAP_TOKEN, runProbes, startFixture, verifyTarget } from "../src/run.ts";
+import { FIXTURE_BOOTSTRAP_TOKEN, runProbes, selfCheckFailureIds, startFixture, verifyTarget } from "../src/run.ts";
 import { EventLog } from "../src/eventlog.ts";
 import { probes } from "../src/probes.ts";
 
@@ -239,4 +239,12 @@ test("VERIFY-1: nothing under verify imports core, auth, the demo or any workspa
     }
   assert.deepEqual(bad, []);
   assert.ok(existsSync(join(root, "src/inspector.ts")));
+});
+
+test("the self-check counts an unverified probe as a mismatch, never as nothing", () => {
+  const mk = (extra: object) => ({ probe: storage, passed: false, evidence: "", reproduction: "", ...extra });
+  assert.deepEqual(selfCheckFailureIds([mk({ unverified: "no dir" })]), ["UNVERIFIED:storage-canary-at-rest"]);
+  assert.deepEqual(selfCheckFailureIds([mk({ skipped: "n/a" })]), []);
+  assert.deepEqual(selfCheckFailureIds([mk({})]), ["storage-canary-at-rest"]);
+  assert.deepEqual(selfCheckFailureIds([mk({ passed: true })]), []);
 });
