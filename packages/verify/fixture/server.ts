@@ -10,7 +10,7 @@ const ALL = [
   "default-role", "session-fixation", "weak-cookie", "logout-keeps-session", "role-change-keeps-session", "admin-open-to-member", "api-key-cross-tenant", "api-key-unscoped",
   "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
   "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors", "key-secret-length-ignored", "admin-user-create-refused", "listing-leaks-digest", "listing-leaks-token",
-  "notes-plaintext-at-rest", "secret-plaintext-at-rest", "plaintext-in-freed-page", "secret-readable-via-list", "secret-readable-via-param-route", "secret-echoed-on-store",
+  "notes-plaintext-at-rest", "secret-plaintext-at-rest", "plaintext-in-freed-page", "secret-readable-via-list", "secret-readable-via-param-route", "secret-echoed-on-store", "notes-plaintext-on-second", "secret-plaintext-on-second",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -60,7 +60,7 @@ function persistNote(tenant: string, text: string) {
   const db = tenantDb(tenant);
   if (!db) return;
   if (bugs.has("notes-dropped")) return; // creates the tenant database on first use, then stores nothing
-  db.prepare("insert into notes (text) values (?)").run(bugs.has("notes-plaintext-at-rest") ? text : seal(tenant, "notes", "text", text));
+  db.prepare("insert into notes (text) values (?)").run(bugs.has("notes-plaintext-at-rest") || (bugs.has("notes-plaintext-on-second") && notes.filter((n) => n.tenant === tenant).length >= 2) ? text : seal(tenant, "notes", "text", text));
   if (bugs.has("plaintext-in-freed-page")) {
     db.prepare("insert into scratch (v) values (?)").run(text);
     db.exec("delete from scratch");
@@ -68,7 +68,7 @@ function persistNote(tenant: string, text: string) {
 }
 function persistSecret(tenant: string, name: string, value: string) {
   if (bugs.has("secrets-dropped")) { tenantDb(tenant); return; }
-  tenantDb(tenant)?.prepare("insert or replace into tenant_secrets (name, value) values (?, ?)").run(name, bugs.has("secret-plaintext-at-rest") ? value : seal(tenant, "tenant_secrets", "value", value));
+  tenantDb(tenant)?.prepare("insert or replace into tenant_secrets (name, value) values (?, ?)").run(name, bugs.has("secret-plaintext-at-rest") || (bugs.has("secret-plaintext-on-second") && [...secrets.keys()].filter((k) => k.startsWith(`${tenant}|`)).length >= 2) ? value : seal(tenant, "tenant_secrets", "value", value));
 }
 const secrets = new Map<string, string>(); // key: tenant|name
 

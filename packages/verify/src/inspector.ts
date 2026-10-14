@@ -57,7 +57,9 @@ function filesUnder(dir: string, incomplete: string[], root = realpathSync(dir),
 export function fingerprintStorage(dir: string): Map<string, string> {
   const incomplete: string[] = [];
   const m = new Map<string, string>();
-  for (const f of filesUnder(dir, incomplete)) { const st = statSync(join(dir, f)); m.set(f, `${st.size}:${st.mtimeMs}`); }
+  for (const f of filesUnder(dir, incomplete)) {
+    try { const st = statSync(join(dir, f)); m.set(f, `${st.size}:${st.mtimeMs}`); } catch { m.set(f, "unreadable"); } // vanished between listing and stat: a change in itself
+  }
   return m;
 }
 
@@ -93,15 +95,26 @@ function cellContains(v: unknown, needle: Buffer): boolean {
 
 /**
  * Scans `dir` for any of `markers`. Raises when `dir` is not a readable directory (a wrong path is a configuration error,
- * not "nothing found"). Hits are reported per layer so a leak only the raw layer sees (a deleted row, a WAL frame) is visible.
+ * not "nothing found"). A file that vanishes or cannot be read mid-scan goes to `incomplete` and the hits already collected are kept,
+ * so a real leak elsewhere is still reported. `beforeFile` is a test seam called just before each file is read.
+ * Hits are reported per layer so a leak only the raw layer sees (a deleted row, a WAL frame) is visible.
  */
-export function scanStorage(dir: string, markers: readonly string[]): StorageScan {
+export function scanStorage(dir: string, markers: readonly string[], beforeFile?: (file: string) => void): StorageScan {
   if (!statSync(dir).isDirectory()) throw new Error(`${dir} is not a directory`);
   const needles = markers.map((m) => ({ m, b: Buffer.from(m, "utf8") }));
   const scan: StorageScan = { filesScanned: 0, sqliteOpened: 0, tablesScanned: 0, rowsScanned: 0, hits: [], incomplete: [] };
   for (const file of filesUnder(dir, scan.incomplete)) {
     const path = join(dir, file);
-    const bytes = readFileSync(path);
+    beforeFile?.(file);
+    let bytes: Buffer;
+    let sqlite: boolean;
+    try {
+      bytes = readFileSync(path);
+      sqlite = isSqlite(path);
+    } catch (e) {
+      scan.incomplete.push(`${file}: unreadable during the scan: ${(e as Error).message}`);
+      continue;
+    }
     scan.filesScanned++;
     for (const { m, b } of needles) {
       let at = bytes.indexOf(b);
@@ -110,7 +123,7 @@ export function scanStorage(dir: string, markers: readonly string[]): StorageSca
         at = bytes.indexOf(b, at + b.length);
       }
     }
-    if (!isSqlite(path)) continue;
+    if (!sqlite) continue;
     let db: DatabaseSync | undefined;
     try {
       db = openReadOnly(path);

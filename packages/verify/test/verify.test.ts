@@ -33,7 +33,9 @@ test("every probe maps to a real spec rule and its scenario stub", () => {
 test("with every bug present, exactly the cataloged probes fail", async () => {
   const fx = await startFixture(seededBugs.map((b) => b.id));
   try {
-    const failed = (await runProbes(fx.url, probes, FIXTURE_BOOTSTRAP_TOKEN, fx.env)).filter((r) => !r.passed && r.skipped === undefined).map((r) => r.probe.id).sort();
+    const results = await runProbes(fx.url, probes, FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.deepEqual(results.filter((r) => r.unverified !== undefined).map((r) => r.probe.id), [], "an UNVERIFIED probe is not a probe that failed for the right reason");
+    const failed = results.filter((r) => !r.passed && r.skipped === undefined).map((r) => r.probe.id).sort();
     assert.deepEqual(failed, [...new Set(seededBugs.flatMap((b) => b.probeIds))].sort());
   } finally {
     await fx.stop();

@@ -44,4 +44,6 @@ export const seededBugs: SeededBug[] = [
   { id: "secret-readable-via-list", description: "GET /secrets returns each stored secret's value", probeIds: ["secret-write-only-readback"] },
   { id: "secret-readable-via-param-route", description: "GET /secrets/:name returns the stored secret's value (found only by filling the path parameter)", probeIds: ["secret-write-only-readback"] },
   { id: "secret-echoed-on-store", description: "POST /secrets echoes the stored value in its response", probeIds: ["secret-write-only-readback"] },
+  { id: "notes-plaintext-on-second", description: "The first note of a tenant is sealed but every later one is stored as plaintext, so only the probe's second plant exposes it", probeIds: ["storage-canary-at-rest"] },
+  { id: "secret-plaintext-on-second", description: "The first secret of a tenant is sealed but every later one is stored as plaintext", probeIds: ["storage-canary-at-rest"] },
 ];

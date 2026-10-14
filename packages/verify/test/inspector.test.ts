@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -147,13 +147,13 @@ test("CRYPTO-5 never passes if a read-back route errors: a 500 hides what it wou
     if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
     if (req.url === "/secrets" && req.method === "POST") return ok(201);
     if (req.url === "/boom") return ok(500);
-    if (req.url === "/clean") return ok(200);
+    if (req.url === "/clean" || req.url === "/secrets") return ok(200);
     return ok(404);
   });
   await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
   const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
   try {
-    const routes = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/clean" }];
+    const routes = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }];
     const [clean] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes });
     assert.equal(clean?.passed, true, "control: without a 5xx route the same stub passes");
     const [r] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...routes, { method: "GET", path: "/boom" }] });
@@ -172,6 +172,8 @@ test("each new probe passes the fixed fixture and fails only on its own seeded b
     ["secret-readable-via-list", ["secret-write-only-readback"]],
     ["secret-readable-via-param-route", ["secret-write-only-readback"]],
     ["secret-echoed-on-store", ["secret-write-only-readback"]],
+    ["notes-plaintext-on-second", ["storage-canary-at-rest"]],
+    ["secret-plaintext-on-second", ["storage-canary-at-rest"]],
   ];
   for (const [bug, expected] of [["", []] as [string, string[]], ...cases]) {
     const fx = await startFixture(bug ? [bug] : []);
@@ -345,13 +347,13 @@ test("CRYPTO-5: a parameter route that answers 404 to every fill value was not e
     if (req.url === "/auth/bootstrap") return ok(201);
     if (req.url === "/auth/login") return ok(200, { "set-cookie": "__Host-bk_session=bks_x; Path=/; Secure; HttpOnly" });
     if (req.url === "/secrets" && req.method === "POST") return ok(201);
-    if (req.url === "/clean") return ok(200);
+    if (req.url === "/clean" || req.url === "/secrets") return ok(200);
     return ok(404);
   });
   await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
   const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
   try {
-    const base = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/clean" }];
+    const base = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }];
     const [r] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...base, { method: "GET", path: "/secrets/:name" }] });
     assert.equal(r?.passed, false);
     assert.match(r?.unverified ?? "", /GET \/secrets\/:name/);
@@ -381,14 +383,18 @@ const STORE = { method: "POST", path: "/secrets" };
 
 test("CRYPTO-5 coverage: only the owner's answer counts, a parameter route needs a 2xx, and {x} [x] * are parameters too", async () => {
   const cases: { name: string; answer: (p: string, c: boolean) => number; routes: { method: string; path: string }[]; unverified: RegExp | null }[] = [
-    { name: "param route: owner 404, anonymous 401", answer: (p, c) => (p.startsWith("/t/") ? (c ? 404 : 401) : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: /GET \/t\/:id/ },
-    { name: "param route: owner 403, anonymous 200", answer: (p, c) => (p.startsWith("/t/") ? (c ? 403 : 200) : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: /GET \/t\/:id/ },
-    { name: "{id} form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/{id}" }], unverified: /GET \/t\/\{id\}/ },
-    { name: "[id] form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/[id]" }], unverified: /GET \/t\/\[id\]/ },
-    { name: "* form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/*" }], unverified: /GET \/t\/\*/ },
+    { name: "param route: owner 404, anonymous 401", answer: (p, c) => (p.startsWith("/t/") ? (c ? 404 : 401) : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: /GET \/t\/:id/ },
+    { name: "param route: owner 403, anonymous 200", answer: (p, c) => (p.startsWith("/t/") ? (c ? 403 : 200) : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: /GET \/t\/:id/ },
+    { name: "{id} form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/{id}" }], unverified: /GET \/t\/\{id\}/ },
+    { name: "[id] form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/[id]" }], unverified: /GET \/t\/\[id\]/ },
+    { name: "* form is a parameter", answer: (p) => (p.startsWith("/t/") ? 404 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/*" }], unverified: /GET \/t\/\*/ },
+    { name: "owner gets 401 on every plain route", answer: (p, c) => (c ? 401 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }], unverified: /nothing was really read back/ },
+    { name: "owner gets 403 on every plain route", answer: (p, c) => (c ? 403 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }], unverified: /nothing was really read back/ },
+    { name: "owner gets 400 on every plain route", answer: (p, c) => (c ? 400 : 200), routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }], unverified: /nothing was really read back/ },
+    { name: "only GET /healthz answers 200: nothing secret-related was read", answer: (p) => (p === "/healthz" ? 200 : 404), routes: [STORE, { method: "GET", path: "/healthz" }], unverified: /none is secret-related/ },
     { name: "every GET in the manifest answers 404", answer: () => 404, routes: [STORE, { method: "GET", path: "/a" }, { method: "GET", path: "/b" }], unverified: /nothing was really read back/ },
-    { name: "positive control: :id answered 200 for the owner", answer: () => 200, routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: null },
-    { name: "positive control: {id} answered 200", answer: () => 200, routes: [STORE, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/{id}" }], unverified: null },
+    { name: "positive control: :id answered 200 for the owner", answer: () => 200, routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/:id" }], unverified: null },
+    { name: "positive control: {id} answered 200", answer: () => 200, routes: [STORE, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }, { method: "GET", path: "/t/{id}" }], unverified: null },
   ];
   for (const c of cases) {
     const stub = await stubTarget(c.answer);
@@ -418,7 +424,6 @@ test("CRYPTO-1: a write that creates the tenant database but stores nothing is U
 
 test("CRYPTO-1: the persist directory vanishing mid-run is UNVERIFIED, not a thrown error", async () => {
   const { createServer } = await import("node:http");
-  const { rmSync } = await import("node:fs");
   const dir = tmp();
   writeFileSync(join(dir, "seed"), "x");
   const stub = createServer((req, res) => {
@@ -464,4 +469,97 @@ test("fixture cleanup: stopping a fixture that already died does not hang and re
   await new Promise((r) => setTimeout(r, 300));
   await fx.stop();
   assert.equal(existsSync(dir), false);
+});
+
+test("a file that vanishes mid-scan is incomplete, and a leak found elsewhere stays a leak", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "a-leaky.bin"), `x${CANARY}x`);
+  writeFileSync(join(dir, "b-vanishing.bin"), "y");
+  writeFileSync(join(dir, "c-clean.bin"), "z");
+  const scan = scanStorage(dir, [CANARY], (f) => { if (f === "b-vanishing.bin") rmSync(join(dir, f)); });
+  assert.ok(scan.hits.some((h) => h.file === "a-leaky.bin"), "hits collected before the race are kept");
+  assert.ok(scan.incomplete.some((m) => m.startsWith("b-vanishing.bin:")), scan.incomplete.join("|"));
+  assert.equal(scan.filesScanned, 2, "scanning carried on past the vanished file");
+});
+
+test("CRYPTO-1: a leak is a FAIL even when the directory also holds an unscannable entry", async () => {
+  // Probe-level rule: leak first, incompleteness only blocks a pass.
+  const fx = await startFixture(["notes-plaintext-at-rest"]);
+  try {
+    symlinkSync(join(tmp(), "nowhere"), join(fx.env.persistDir!, "dangling")); // makes `incomplete` non-empty
+    const [leak] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.equal(leak?.unverified, undefined);
+    assert.equal(leak?.passed, false);
+    assert.match(leak?.evidence ?? "", /plaintext found/);
+  } finally {
+    await fx.stop();
+  }
+});
+
+test("CRYPTO-1: a setup error in the secret half does not hide a notes leak", async () => {
+  const fx = await startFixture(["notes-plaintext-at-rest"]);
+  try {
+    // Claim a secret store route the owner cannot use: wrong bootstrap token makes ownerTenant fail after the notes were planted.
+    const [r] = await runProbes(fx.url, [storage], "wrong-bootstrap-token", fx.env);
+    assert.equal(r?.unverified, undefined);
+    assert.equal(r?.passed, false);
+    assert.match(r?.evidence ?? "", /plaintext found in storage/);
+  } finally {
+    await fx.stop();
+  }
+  const clean = await startFixture([]);
+  try {
+    const [r] = await runProbes(clean.url, [storage], "wrong-bootstrap-token", clean.env);
+    assert.match(r?.evidence ?? "", /bootstrapping an owner/, "without a leak the setup error is what gets reported");
+  } finally {
+    await clean.stop();
+  }
+});
+
+test("CRYPTO-1: a leak that appears only on the second plant is caught (the second marker is scanned)", async () => {
+  for (const [bug, ] of [["notes-plaintext-on-second"], ["secret-plaintext-on-second"]] as const) {
+    const fx = await startFixture([bug]);
+    try {
+      const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+      assert.equal(r?.passed, false, bug);
+      assert.match(r?.evidence ?? "", /plaintext found in storage/, bug);
+    } finally {
+      await fx.stop();
+    }
+  }
+});
+
+test("CRYPTO-1: databases with no rows after a plant that changed the directory are unverified (the rows guard is reachable)", async () => {
+  const { createServer } = await import("node:http");
+  const { appendFileSync } = await import("node:fs");
+  const dir = tmp();
+  const db = new DatabaseSync(join(dir, "empty.sqlite"));
+  db.exec("create table notes (text text)");
+  db.close();
+  const stub = createServer((req, res) => {
+    req.resume();
+    if (req.method === "POST") appendFileSync(join(dir, "activity.log"), "x"); // something changes, but no row is stored
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
+  try {
+    const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
+    const [r] = await runProbes(url, [storage], FIXTURE_BOOTSTRAP_TOKEN, { persistDir: dir });
+    assert.match(r?.unverified ?? "", /hold no rows/);
+  } finally {
+    await new Promise<void>((r) => { stub.close(() => r()); stub.closeAllConnections(); });
+  }
+});
+
+test("CRYPTO-1 pass evidence states its recorded limits", async () => {
+  const fx = await startFixture([]);
+  try {
+    const [r] = await runProbes(fx.url, [storage], FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.equal(r?.passed, true, r?.evidence);
+    assert.match(r?.evidence ?? "", /Classified fields planted: notes, secrets/);
+    assert.match(r?.evidence ?? "", /directory-wide, not per tenant/);
+  } finally {
+    await fx.stop();
+  }
 });
