@@ -104,10 +104,38 @@ test("keys must be 32 bytes, and an imported key cannot be exported", async () =
   await assert.rejects(crypto.subtle.exportKey("raw", key.cryptoKey));
 });
 
-test("a sealed value is not mutated by the caller's buffers: nonce and plaintext arrays are copied or read once", async () => {
+test("text round-trips exactly: a leading BOM is kept, lone surrogates are refused instead of altered, invalid text is a CryptoError", async () => {
+  const key = await importDataKey(raw(1));
+  for (const text of ["\uFEFFabc", "\uFEFF", "héllo \u{1F600}", "a\u0000b"]) assert.equal(await openText(key, ctx, await seal(key, ctx, nonce(1), text)), text);
+  await assert.rejects(seal(key, ctx, nonce(2), "a\uD800"), CryptoError);
+  // Bytes that are not UTF-8 open as bytes but not as text, and the failure is the uniform one.
+  const bytes = await seal(key, ctx, nonce(3), new Uint8Array([0xff, 0xfe]));
+  assert.deepEqual(await open(key, ctx, bytes), new Uint8Array([0xff, 0xfe]));
+  await rejects(openText(key, ctx, bytes));
+});
+
+test("CRYPTO-2: the AAD is exactly bulkhead/v1|tenant|table|field|keyVersion, and lone surrogates cannot alias U+FFFD in a context", () => {
+  assert.equal(new TextDecoder().decode(additionalData(ctx)), "bulkhead/v1|acme|notes|text|1");
+  assert.equal(new TextDecoder().decode(additionalData({ ...ctx, keyVersion: 12 })), "bulkhead/v1|acme|notes|text|12");
+  assert.throws(() => additionalData({ ...ctx, tenantId: "a\uD800" }), CryptoError);
+  assert.throws(() => additionalData({ ...ctx, table: "t\uDC00" }), CryptoError);
+});
+
+test("runtime type holes are CryptoErrors: a string as nonce, key or plaintext", async () => {
+  const key = await importDataKey(raw(1));
+  await assert.rejects(seal(key, ctx, "abcdefghijkl" as never, "x"), CryptoError);
+  await assert.rejects(seal(key, ctx, nonce(1), 42 as never), CryptoError);
+  await assert.rejects(importDataKey("x".repeat(32) as never), CryptoError);
+});
+
+test("the caller cannot change a sealed value by mutating its buffers while seal is in flight", async () => {
   const key = await importDataKey(raw(1));
   const n = nonce(7);
-  const sealed = await seal(key, ctx, n, "x");
+  const bytes = new Uint8Array([1, 2, 3, 4]);
+  const pending = seal(key, ctx, n, bytes);
   n.fill(0xff);
-  assert.equal(await openText(key, ctx, sealed), "x");
+  bytes.fill(0);
+  const sealed = await pending;
+  assert.deepEqual(await open(key, ctx, sealed), new Uint8Array([1, 2, 3, 4]));
+  assert.deepEqual(parseEnvelope(sealed)?.nonce, nonce(7));
 });
