@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     "./tenant": "./src/tenant/index.ts",
-    "./api": "./src/api/index.ts"
+    "./api": "./src/api/index.ts",
+    "./crypto": "./src/crypto/index.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
