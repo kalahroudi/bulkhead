@@ -5,12 +5,14 @@ import { spawn } from "node:child_process";
 import { request } from "node:http";
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const demo = join(fileURLToPath(new URL("..", import.meta.url)), "examples/demo-app");
+// wrangler loads .dev.vars on its own, which would hand the "no key" cases real keys and make them fail for the wrong reason.
+if (existsSync(join(demo, ".dev.vars"))) { console.error("examples/demo-app/.dev.vars exists and would supply keys to every case; move it aside and run again"); process.exit(2); }
 const good = randomBytes(32).toString("base64");
 
 interface Case { name: string; vars: Record<string, string>; serves: boolean }

@@ -1044,10 +1044,14 @@ export const probes: Probe[] = [
         const same = await req(ownerA.h, "GET", "/notes");
         if (same.status >= 200 && same.status < 300 && countOf(same.body, N1) >= 2) { /* control: the app reads through what we wrote, and opens an envelope in its own context */ }
         else {
-          rowBound = true; // the app also binds the row (stronger than the spec's three fields): the control cannot show the write reached the app
+          // Not duplicated. That is either the app refusing the row (it binds the row, stronger than the spec) or a write that never reached it.
+          // Only a changed answer is evidence of the first: an unchanged one cannot be told apart from a tamper the app never saw.
+          const changed = same.status < 200 || same.status >= 300 || !same.body.includes(N2);
+          if (!changed) return unverified(`the same-context control wrote a note envelope over another on disk, but the running app's answer did not change (HTTP ${same.status}, same notes); the write did not demonstrably reach the app, so a later "failed to open" would prove nothing`, reproduction);
+          rowBound = true;
           restore();
           const healthy = await req(ownerA.h, "GET", "/notes");
-          if (healthy.status < 200 || healthy.status >= 300 || !healthy.body.includes(N1) || !healthy.body.includes(N2)) return unverified(`the same-context control failed (HTTP ${same.status}) and the app did not recover after the cell was restored (HTTP ${healthy.status}); the tamper channel cannot be trusted`, reproduction);
+          if (healthy.status < 200 || healthy.status >= 300 || !healthy.body.includes(N1) || !healthy.body.includes(N2)) return unverified(`the same-context control changed the app's answer (HTTP ${same.status}) but the app did not recover after the cell was restored (HTTP ${healthy.status}); the tamper channel cannot be trusted`, reproduction);
         }
         restore();
 

@@ -5,6 +5,17 @@ export type SqlExec = (sql: string, params: unknown[]) => { rows: Record<string,
 
 const RESERVED = /_bulkhead_/i;
 
+/**
+ * In an app with classified data, routes may only read and write rows. Schema changes belong in the schema steps, which are checked against the
+ * classification when the tenant initialises; a route that could run DDL or `pragma ignore_check_constraints` would walk around that check.
+ * One statement only: a `;` followed by anything is refused.
+ */
+function assertDataStatement(sql: string) {
+  const text = sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ").trim().replace(/;\s*$/, "");
+  if (!/^(select|insert|update|delete|replace|with)\b/i.test(text) || text.includes(";")) throw new Error("only single data statements are allowed");
+  if (/\bpragma\b/i.test(text) && !/pragma_table_info/i.test(text)) throw new Error("only single data statements are allowed");
+}
+
 export class TenantStore {
   private exec: SqlExec;
   private ready = false;
@@ -34,6 +45,7 @@ export class TenantStore {
 
   run(tenantId: string, schema: readonly string[], sql: string, params: unknown[], classification?: Classification) {
     if (RESERVED.test(sql)) throw new Error("reserved table");
+    if (classification) assertDataStatement(sql);
     this.guard(tenantId, schema, classification);
     return this.exec(sql, params);
   }

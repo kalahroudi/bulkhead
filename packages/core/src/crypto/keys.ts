@@ -8,6 +8,8 @@ import { isEncryptedClass, lookupField, type Classification } from "./classifica
 
 export class MasterKeyError extends Error {}
 export class KeyUnavailableError extends Error {}
+/** The tenant's data keys were destroyed on purpose (CRYPTO-3). Only this answers 410; every other key fault is an ordinary server error. */
+export class KeyDestroyedError extends KeyUnavailableError {}
 
 export interface MasterKeys {
   current: number;
@@ -74,7 +76,7 @@ export function createKeyRing(db: D1Like, master: MasterKeys, now: () => number 
   }
 
   async function unwrap(tenantId: string, row: KeyRow): Promise<DataKey> {
-    if (row.wrapped === null) throw new KeyUnavailableError("tenant key destroyed");
+    if (row.wrapped === null) throw new KeyDestroyedError("tenant key destroyed");
     const blob = fromBase64Url(row.wrapped);
     if (!blob) throw new KeyUnavailableError("tenant key cannot be unwrapped");
     try {
@@ -90,7 +92,8 @@ export function createKeyRing(db: D1Like, master: MasterKeys, now: () => number 
 
   async function insertVersion(tenantId: string, version: number) {
     const wrapped = await wrap(tenantId, version);
-    await db.prepare("insert or ignore into tenant_keys (tenant_id, version, master_version, wrapped, created_at) values (?, ?, ?, ?, ?)").bind(tenantId, version, master.current, wrapped, now()).run();
+    // Refused while any row of the tenant is shredded, so a rotation racing a shred cannot leave a live key behind.
+    await db.prepare("insert or ignore into tenant_keys (tenant_id, version, master_version, wrapped, created_at) select ?, ?, ?, ?, ? where not exists (select 1 from tenant_keys where tenant_id = ? and wrapped is null)").bind(tenantId, version, master.current, wrapped, now(), tenantId).run();
   }
 
   const ring: KeyRing = {
@@ -119,7 +122,7 @@ export function createKeyRing(db: D1Like, master: MasterKeys, now: () => number 
         const all = await rows(tenantId);
         const last = all[all.length - 1];
         if (!last) throw new KeyUnavailableError("tenant has no key");
-        if (last.wrapped === null) throw new KeyUnavailableError("tenant key destroyed");
+        if (all.some((r) => r.wrapped === null)) throw new KeyDestroyedError("tenant key destroyed");
         version = { version: last.version, until: now() + ttlMs };
         latest.set(tenantId, version);
       }
@@ -128,7 +131,7 @@ export function createKeyRing(db: D1Like, master: MasterKeys, now: () => number 
     async rotate(tenantId) {
       await schema();
       const all = await rows(tenantId);
-      if (all.length === 0 || all.some((r) => r.wrapped === null)) throw new KeyUnavailableError("tenant key destroyed or absent");
+      if (all.length === 0 || all.some((r) => r.wrapped === null)) throw new KeyDestroyedError("tenant key destroyed or absent");
       const next = (all[all.length - 1] as KeyRow).version + 1;
       await insertVersion(tenantId, next);
       latest.delete(tenantId);

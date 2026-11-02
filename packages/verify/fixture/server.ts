@@ -137,6 +137,7 @@ async function persistSecret(tenant: string, name: string, value: string) {
 /** Notes as the app reads them: opened from storage when the fixture persists, else from memory. The missing-tenant-filter bug reads every tenant (that can be read). */
 function readNotes(tenant: string, everyone = false): string[] {
   if (!PERSIST) return everyone ? notes.map((n) => n.text) : notes.filter((n) => n.tenant === tenant).map((n) => n.text);
+  if (bugs.has("reads-ignore-disk")) { ringOf(tenant); return notes.filter((n) => n.tenant === tenant).map((n) => n.text); } // test-only: the app never sees a change made on disk
   const out: string[] = [];
   for (const t of everyone ? [...dbs.keys()] : [tenant]) {
     try {

@@ -27,7 +27,7 @@ export const isEncryptedClass = (c: DataClass) => ENCRYPTED.includes(c);
  * which is why the sealed write path exists and the verify canary stays the backstop. Use it in the column definition.
  */
 export const sealedCheck = (column: string) =>
-  `check ("${column}" glob 'bk1:[1-9]*:????????????????:*' and "${column}" not glob '*[^A-Za-z0-9_:-]*')`;
+  `check ("${column}" glob 'bk1:[1-9]*:????????????????:?*' and "${column}" not glob '*[^A-Za-z0-9_:-]*')`;
 
 /** Fails closed: anything malformed throws. Same rules as the spec package's validator (a secret must be write-only; no duplicates). */
 export function parseClassification(input: unknown): Classification {
@@ -49,7 +49,19 @@ export function lookupField(c: Classification, table: string, field: string): Cl
   return c.fields.find((f) => f.table === table && f.field === field);
 }
 
-const normalise = (sql: string) => sql.toLowerCase().replace(/["'`\s]/g, "");
+const squash = (sql: string) => sql.replace(/\s+/g, " ").trim();
+
+/** True when `needle` occurs in the table's SQL outside comments and outside any string literal, so a comment or a default value cannot stand in for the CHECK. */
+function hasLiveCheck(tableSql: string, needle: string): boolean {
+  const code = squash(tableSql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " "));
+  const want = squash(needle);
+  for (let at = code.indexOf(want); at !== -1; at = code.indexOf(want, at + 1)) {
+    // Quotes before this point: an even count outside the CHECK's own literals means the match is not inside a string. Count only before `at`.
+    const quotes = (code.slice(0, at).match(/'/g) ?? []).length;
+    if (quotes % 2 === 0) return true;
+  }
+  return false;
+}
 
 /**
  * Run once when a tenant's database initialises, after the schema steps. Refuses (throws) when
@@ -59,16 +71,16 @@ const normalise = (sql: string) => sql.toLowerCase().replace(/["'`\s]/g, "");
  */
 export function enforceClassification(exec: SqlExec, c: Classification) {
   // The runtime's own tables (SQLite's, Durable Objects' `_cf_*`, local miniflare's `__miniflare*`) and ours are not app data.
-  const tables = (exec("select name, sql from sqlite_master where type = 'table'", []).rows as { name: string; sql: string }[]).filter((t) => !/^(_bulkhead_|sqlite_|_cf_|__miniflare)/.test(t.name));
+  const tables = (exec("select name, sql from sqlite_master where type = 'table'", []).rows as { name: string; sql: string }[]).filter((t) => !/^(_bulkhead_meta$|sqlite_|_cf_[A-Z]+$|__miniflare_do_name$)/.test(t.name));
   const columns = new Set<string>();
   for (const t of tables) {
-    const sql = normalise(t.sql ?? "");
+    const sql = t.sql ?? "";
     for (const col of exec("select name from pragma_table_info(?)", [t.name]).rows as { name: string }[]) {
       const key = `${t.name}.${col.name}`;
       columns.add(key);
       const f = lookupField(c, t.name, col.name);
       if (!f) throw new ClassificationError(`unclassified column ${key}: the tenant refuses to initialise`);
-      if (isEncryptedClass(f.class) && !sql.includes(normalise(sealedCheck(col.name)))) throw new ClassificationError(`column ${key} is ${f.class} but has no sealed-value CHECK; the tenant refuses to initialise`);
+      if (isEncryptedClass(f.class) && !hasLiveCheck(sql, sealedCheck(col.name))) throw new ClassificationError(`column ${key} is ${f.class} but has no sealed-value CHECK; the tenant refuses to initialise`);
     }
   }
   for (const f of c.fields) if (!columns.has(`${f.table}.${f.field}`)) throw new ClassificationError(`classified column ${f.table}.${f.field} does not exist`);

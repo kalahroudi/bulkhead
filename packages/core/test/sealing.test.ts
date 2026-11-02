@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { createApp } from "../src/api/index.ts";
-import { createKeyRing, enforceClassification, loadMasterKeys, parseClassification, sealedCheck, KeyUnavailableError } from "../src/crypto/index.ts";
+import { createKeyRing, enforceClassification, KeyDestroyedError, loadMasterKeys, parseClassification, sealedCheck, KeyUnavailableError } from "../src/crypto/index.ts";
 import { TenantStore } from "../src/tenant/store.ts";
 import { fakeD1, makeEnv } from "./fakes.ts";
 
@@ -93,7 +93,7 @@ test("CRYPTO-1: the database itself rejects plaintext, a look-alike prefix and w
   s.store.run("t", SCHEMA, "insert into notes (text) values (?)", ["bk1:1:AAAAAAAAAAAAAAAA:abc_-"], CLASSIFICATION);
 });
 
-test("CRYPTO-4: nonce reservations are unique, per key version, and survive concurrent callers", async () => {
+test("CRYPTO-4: nonce reservations are unique and counted per key version", async () => {
   const s = store();
   const seen = new Set<number>();
   await Promise.all(Array.from({ length: 500 }, async () => seen.add(s.store.nonce("t", SCHEMA, 1, CLASSIFICATION))));
@@ -207,4 +207,81 @@ test("CRYPTO-3: shredding a tenant that was never keyed still leaves marker rows
   await assert.rejects(() => createKeyRing(db, loadMasterKeys(KEYS)).current("fresh"), KeyUnavailableError); // another isolate
   const rows = db.raw.prepare("select wrapped from tenant_keys where tenant_id = 'fresh'").all() as { wrapped: unknown }[];
   assert.ok(rows.length > 0 && rows.every((r) => r.wrapped === null));
+});
+
+test("CRYPTO-1: with classified data a route can run only single data statements: no pragma, no DDL, no second statement", () => {
+  const s = store();
+  s.store.run("t", SCHEMA, "select 1", [], CLASSIFICATION);
+  for (const bad of ["pragma ignore_check_constraints = 1", "create table leak (x text)", "alter table notes add column plain text", "drop table notes", "insert into notes (text) values ('bk1:1:AAAAAAAAAAAAAAAA:x'); create table leak2 (x text)", "attach database ':memory:' as x"])
+    assert.throws(() => s.store.run("t", SCHEMA, bad, [], CLASSIFICATION), /only single data statements/, bad);
+  assert.throws(() => s.store.run("t", SCHEMA, "insert into notes (text) values ('PLAIN')", [], CLASSIFICATION), /CHECK/i); // the CHECK is still live
+  s.store.run("t", SCHEMA, "/* note */ select count(*) as n from notes; ", [], CLASSIFICATION);
+});
+
+test("CRYPTO-1: the sealed-value CHECK must be real SQL: a comment or a default value that spells it does not count", () => {
+  const check = sealedCheck("text");
+  const fake = [
+    `create table notes (id integer primary key autoincrement, text text not null /* ${check} */, label text)`,
+    `create table notes (id integer primary key autoincrement, text text not null, label text default '${check.replaceAll("'", "''")}')`,
+    `create table notes (id integer primary key autoincrement, text text not null, label text) -- ${check}`,
+  ];
+  for (const ddl of fake) {
+    const s = store();
+    assert.throws(() => s.store.run("t", [ddl, SCHEMA[1] as string], "select 1", [], CLASSIFICATION), /no sealed-value CHECK/, ddl);
+  }
+});
+
+test("CRYPTO-1: the CHECK refuses an empty ciphertext part", () => {
+  const s = store();
+  s.store.run("t", SCHEMA, "select 1", [], CLASSIFICATION);
+  assert.throws(() => s.store.run("t", SCHEMA, "insert into notes (text) values (?)", ["bk1:1:AAAAAAAAAAAAAAAA:"], CLASSIFICATION), /CHECK/i);
+});
+
+test("CRYPTO-1: runtime-table exemptions are exact names, so an app table cannot hide behind a prefix", () => {
+  for (const name of ["__miniflare_x", "_cf_x", "_bulkhead_x"]) {
+    const s = store();
+    assert.throws(() => s.store.run("t", [...SCHEMA, `create table ${name} (secret text)`], "select 1", [], CLASSIFICATION), /unclassified column/, name);
+  }
+});
+
+test("CRYPTO-3: a rotation that races a shred cannot leave a live key behind", async () => {
+  const db = fakeD1();
+  const master = loadMasterKeys(KEYS);
+  const ring = createKeyRing(db, master);
+  await ring.ensureTenantKey("r");
+  let armed = false;
+  const racing = {
+    ...db,
+    prepare: (sql: string) => {
+      const st = db.prepare(sql) as ReturnType<typeof db.prepare>;
+      if (!/^select version, master_version, wrapped/.test(sql)) return st;
+      return { ...st, bind: (...v: unknown[]) => { const b = st.bind(...v); return { ...b, all: async () => { const r = await b.all(); if (armed) db.raw.prepare("update tenant_keys set wrapped = null").run(); return r; } }; } } as never;
+    },
+  } as typeof db;
+  const racer = createKeyRing(racing, master);
+  armed = true;
+  await racer.rotate("r").catch(() => undefined); // the shred lands between rotate's read and its insert
+  armed = false;
+  const live = db.raw.prepare("select count(*) as n from tenant_keys where wrapped is not null").get() as { n: number };
+  assert.equal(live.n, 0);
+  await assert.rejects(() => createKeyRing(db, master).current("r"), KeyDestroyedError);
+});
+
+test("only a destroyed tenant key answers 410; a forged key version or a missing master key is an ordinary 500", async () => {
+  const { call } = build();
+  await call("a", "/seal", { table: "notes", field: "text", text: "x" });
+  const forged = await call("a", "/open", { table: "notes", field: "text", sealed: "bk1:99:AAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" });
+  assert.equal(forged.status, 500);
+  await call("a", "/shred", {});
+  assert.equal((await call("a", "/seal", { table: "notes", field: "text", text: "x" })).status, 410);
+});
+
+test("CRYPTO-3: a live newer key version beside a destroyed one is still refused (the tenant is shredded, whatever rows exist)", async () => {
+  const db = fakeD1();
+  const master = loadMasterKeys(KEYS);
+  const ring = createKeyRing(db, master);
+  await ring.ensureTenantKey("s");
+  await ring.rotate("s"); // v1 and v2, both live
+  db.raw.prepare("update tenant_keys set wrapped = null where tenant_id = 's' and version = 1").run(); // v1 destroyed, v2 live
+  await assert.rejects(() => createKeyRing(db, master).current("s"), KeyDestroyedError);
 });

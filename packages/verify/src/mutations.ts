@@ -250,7 +250,7 @@ export const mutations: Mutation[] = [
     // The read path would refuse a plaintext row and the CHECK would refuse the insert: both defences are removed so the app keeps running.
     also: [
       { file: DEMO_ROUTES, find: 'Promise.all((await c.db.query<{ text: string }>("select text from notes order by id")).map((r) => c.db.open("notes", "text", r.text)))', replace: 'Promise.all((await c.db.query<{ text: string }>("select text from notes order by id")).map((r) => r.text))' },
-      { file: CLASSIFICATION, find: `glob 'bk1:[1-9]*:????????????????:*' and`, replace: `glob '*' and` },
+      { file: CLASSIFICATION, find: `glob 'bk1:[1-9]*:????????????????:?*' and`, replace: `glob '*' and` },
       { file: CLASSIFICATION, find: `"\${column}" not glob '*[^A-Za-z0-9_:-]*')\``, replace: `"\${column}" not glob '*[^A-Za-z0-9_:-]*' or 1)\`` },
     ],
     // Shredding cannot make plaintext unreadable, so the shred scenario fails too (plaintext still readable and in storage).
@@ -261,14 +261,14 @@ export const mutations: Mutation[] = [
     find: 'await c.db.seal("tenant_secrets", "value", body.value)',
     replace: "body.value",
     also: [
-      { file: CLASSIFICATION, find: `glob 'bk1:[1-9]*:????????????????:*' and`, replace: `glob '*' and` },
+      { file: CLASSIFICATION, find: `glob 'bk1:[1-9]*:????????????????:?*' and`, replace: `glob '*' and` },
       { file: CLASSIFICATION, find: `"\${column}" not glob '*[^A-Za-z0-9_:-]*')\``, replace: `"\${column}" not glob '*[^A-Za-z0-9_:-]*' or 1)\`` },
     ],
     expect: ["shredding-makes-data-unreadable", "storage-canary-at-rest"],
   },
   {
     id: "sealed-check-accepts-plaintext", rule: "CRYPTO-1", file: CLASSIFICATION,
-    find: `glob 'bk1:[1-9]*:????????????????:*' and`,
+    find: `glob 'bk1:[1-9]*:????????????????:?*' and`,
     replace: `glob '*' and`,
     expect: [],
     gap: "the demo only ever inserts sealed values, so a CHECK that accepts anything changes nothing over HTTP; the database refusing plaintext is a second defence that core unit tests prove (sealing.test.ts)",
@@ -282,7 +282,7 @@ export const mutations: Mutation[] = [
   },
   {
     id: "missing-check-allowed", rule: "CRYPTO-1", file: CLASSIFICATION,
-    find: "if (isEncryptedClass(f.class) && !sql.includes(normalise(sealedCheck(col.name))))",
+    find: "if (isEncryptedClass(f.class) && !hasLiveCheck(sql, sealedCheck(col.name)))",
     replace: "if (false)",
     expect: [],
     gap: "the demo declares the CHECK on every sealed column, so no HTTP request reaches the refusal; core unit tests prove a missing CHECK stops the tenant initialising",
@@ -323,6 +323,34 @@ export const mutations: Mutation[] = [
     also: [{ file: KEYS, find: "{ tenantId, table, field, keyVersion: env.keyVersion }, sealed);", replace: '{ tenantId: "t", table, field, keyVersion: env.keyVersion }, sealed);' }],
     expect: [],
     gap: "every tenant has its own data key, so a cross-tenant transplant still fails on the key even when the AAD omits the tenant; no HTTP scenario separates the two defences, core unit tests cover the AAD at the sealer level",
+  },
+  {
+    id: "run-accepts-any-statement", rule: "CRYPTO-1", file: "packages/core/src/tenant/store.ts",
+    find: "if (classification) assertDataStatement(sql);",
+    replace: "",
+    expect: [],
+    gap: "the demo only sends single data statements, so no HTTP request reaches the refusal of DDL, pragmas and multi-statement text on a classified app; core unit tests prove it",
+  },
+  {
+    id: "any-text-counts-as-a-live-check", rule: "CRYPTO-1", file: CLASSIFICATION,
+    find: "function hasLiveCheck(tableSql: string, needle: string): boolean {",
+    replace: "function hasLiveCheck(tableSql: string, needle: string): boolean {\n  if (tableSql !== null) return true;",
+    expect: [],
+    gap: "the demo declares a real CHECK on every sealed column, so no HTTP request reaches the refusal of a commented or quoted look-alike; core unit tests prove it",
+  },
+  {
+    id: "key-insert-ignores-shredded-rows", rule: "CRYPTO-3", file: KEYS,
+    find: 'select ?, ?, ?, ?, ? where not exists (select 1 from tenant_keys where tenant_id = ? and wrapped is null)").bind(tenantId, version, master.current, wrapped, now(), tenantId)',
+    replace: 'values (?, ?, ?, ?, ?)").bind(tenantId, version, master.current, wrapped, now())',
+    expect: [],
+    gap: "the guard in insertVersion only matters when a rotation races a shred, which a sequential HTTP scenario cannot produce; core unit tests prove no live key is written for a shredded tenant",
+  },
+  {
+    id: "current-key-ignores-shredded-rows", rule: "CRYPTO-3", file: KEYS,
+    find: 'if (all.some((r) => r.wrapped === null)) throw new KeyDestroyedError("tenant key destroyed");',
+    replace: "",
+    expect: [],
+    gap: "the shredded-row refusal in current() is shadowed over HTTP (a shredded tenant is never re-keyed and get() refuses the destroyed rows), so no request reaches it alone; core unit tests prove a live newer version beside a destroyed one is still refused",
   },
   {
     id: "nonce-counter-never-advances", rule: "CRYPTO-4", file: "packages/core/src/tenant/store.ts",
@@ -372,18 +400,23 @@ export const mutations: Mutation[] = [
     find: "if ((await rows(tenantId)).length === 0) await insertVersion(tenantId, 1);",
     replace: "{ const have = await rows(tenantId); if (have.every((r) => r.wrapped === null)) await insertVersion(tenantId, have.length + 1); }",
     // The 60-second ensure memo would hide the re-mint inside the gate's window; the memo is a speed-up, not a defence.
-    also: [{ file: KEYS, find: "      ensured.set(tenantId, now() + ttlMs);\n", replace: "" }],
+    also: [
+      { file: KEYS, find: "      ensured.set(tenantId, now() + ttlMs);\n", replace: "" },
+      // Two more defences now refuse a re-key: insertVersion declines while any row is shredded, and current() refuses any tenant with a shredded row. Both go too.
+      { file: KEYS, find: '        if (all.some((r) => r.wrapped === null)) throw new KeyDestroyedError("tenant key destroyed");\n', replace: "" },
+      { file: KEYS, find: 'select ?, ?, ?, ?, ? where not exists (select 1 from tenant_keys where tenant_id = ? and wrapped is null)").bind(tenantId, version, master.current, wrapped, now(), tenantId)', replace: 'values (?, ?, ?, ?, ?)").bind(tenantId, version, master.current, wrapped, now())' },
+    ],
     expect: ["shredding-makes-data-unreadable"],
   },
   {
     id: "rotation-of-shredded-tenant-allowed", rule: "CRYPTO-3", file: KEYS,
-    find: "if (all.length === 0 || all.some((r) => r.wrapped === null)) throw new KeyUnavailableError(\"tenant key destroyed or absent\");",
-    replace: "if (all.length === 0) throw new KeyUnavailableError(\"tenant key destroyed or absent\");",
+    find: "if (all.length === 0 || all.some((r) => r.wrapped === null)) throw new KeyDestroyedError(\"tenant key destroyed or absent\");",
+    replace: "if (all.length === 0) throw new KeyDestroyedError(\"tenant key destroyed or absent\");",
     expect: ["shredding-makes-data-unreadable"],
   },
   {
-    id: "key-unavailable-is-a-500", rule: "CRYPTO-3", file: "packages/core/src/api/app.ts",
-    find: 'if (err instanceof KeyUnavailableError) return reply(410, "tenant data is unavailable");',
+    id: "destroyed-tenant-answers-500", rule: "CRYPTO-3", file: "packages/core/src/api/app.ts",
+    find: 'if (err instanceof KeyDestroyedError) return reply(410, "tenant data is unavailable");',
     replace: "",
     expect: ["shredding-makes-data-unreadable"],
   },

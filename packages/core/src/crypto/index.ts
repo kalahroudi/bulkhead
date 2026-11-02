@@ -4,7 +4,7 @@ export { CryptoError, additionalData, importDataKey, open, openText, seal } from
 export type { DataKey, SealContext } from "./port.ts";
 export { ClassificationError, enforceClassification, isEncryptedClass, parseClassification, sealedCheck } from "./classification.ts";
 export type { Classification, ClassifiedField, DataClass } from "./classification.ts";
-export { KEY_CACHE_MS, KeyUnavailableError, MasterKeyError, createKeyRing, createSealer, loadMasterKeys } from "./keys.ts";
+export { KEY_CACHE_MS, KeyDestroyedError, KeyUnavailableError, MasterKeyError, createKeyRing, createSealer, loadMasterKeys } from "./keys.ts";
 export type { KeyRing, MasterKeys, Sealer } from "./keys.ts";
 export { nonceFromCounter } from "./nonce.ts";
 export { getKeyRing } from "./ring.ts";

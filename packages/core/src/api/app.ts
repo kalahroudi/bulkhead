@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Classification } from "../crypto/classification.ts";
-import { createSealer, KeyUnavailableError } from "../crypto/keys.ts";
+import { createSealer, KeyDestroyedError } from "../crypto/keys.ts";
 import { getKeyRing } from "../crypto/ring.ts";
 import { ConfigError, loadConfig } from "../tenant/config.ts";
 import { resolveTenant } from "../tenant/directory.ts";
@@ -68,7 +68,7 @@ export function createApp(options: AppOptions = {}) {
   hono.notFound(notFound);
   hono.onError((err) => {
     console.error("request failed", err instanceof Error ? err.name : "error"); // no stack, no message to the client
-    if (err instanceof KeyUnavailableError) return reply(410, "tenant data is unavailable");
+    if (err instanceof KeyDestroyedError) return reply(410, "tenant data is unavailable");
     return reply(500, "internal error");
   });
 

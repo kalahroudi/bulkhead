@@ -111,3 +111,14 @@ test("self-check expectation: an UNVERIFIED outcome masks the failure it prevent
   assert.deepEqual(expectedWithAll(["a", "b", "UNVERIFIED:b", "c", "c"]), ["UNVERIFIED:b", "a", "c"].sort());
   assert.deepEqual(expectedWithAll(["x"]), ["x"]);
 });
+
+test("CRYPTO-2 is UNVERIFIED when a tamper write demonstrably does not reach the running app, never a vacuous pass", async () => {
+  const fx = await startFixture(["reads-ignore-disk"]);
+  try {
+    const [r] = await runProbes(fx.url, byId("aad-transplant-fails"), FIXTURE_BOOTSTRAP_TOKEN, fx.env);
+    assert.equal(r?.passed, false);
+    assert.match(r?.unverified ?? "", /did not demonstrably reach the app/, r?.evidence);
+  } finally {
+    await fx.stop();
+  }
+});
