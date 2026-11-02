@@ -1,3 +1,4 @@
+import { loadMasterKeys, MasterKeyError } from "../crypto/keys.ts";
 import type { Config, D1Like, Environment, TenantNamespaceLike } from "./types.ts";
 
 export class ConfigError extends Error {}
@@ -5,7 +6,7 @@ export class ConfigError extends Error {}
 const ENVS: readonly Environment[] = ["development", "staging", "production"];
 
 /** BOOT-1: fail closed. Any missing or contradictory value throws; the app serves nothing. */
-export function loadConfig(env: Record<string, unknown>): Config {
+export function loadConfig(env: Record<string, unknown>, options: { requireMasterKeys?: boolean } = {}): Config {
   const environment = env.BULKHEAD_ENV;
   if (typeof environment !== "string" || !ENVS.includes(environment as Environment))
     throw new ConfigError(`BULKHEAD_ENV must be one of ${ENVS.join(", ")}`);
@@ -20,5 +21,9 @@ export function loadConfig(env: Record<string, unknown>): Config {
   const auto = env.BULKHEAD_AUTO_PROVISION;
   if (auto !== undefined && auto !== "true" && auto !== "false") throw new ConfigError("BULKHEAD_AUTO_PROVISION must be true or false");
   if (auto === "true" && environment !== "development") throw new ConfigError("BULKHEAD_AUTO_PROVISION=true is only allowed when BULKHEAD_ENV=development");
-  return { environment: environment as Environment, baseDomain, db, tenants, autoProvision: auto === "true" };
+  let masterKeys;
+  if (options.requireMasterKeys) {
+    try { masterKeys = loadMasterKeys(env); } catch (e) { throw e instanceof MasterKeyError ? new ConfigError(e.message) : e; }
+  }
+  return { environment: environment as Environment, baseDomain, db, tenants, autoProvision: auto === "true", masterKeys };
 }

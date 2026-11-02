@@ -1,5 +1,21 @@
 [
   {
+    "method": "POST",
+    "path": "/admin/rotate-key",
+    "access": {
+      "kind": "role",
+      "role": "owner"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/admin/shred",
+    "access": {
+      "kind": "role",
+      "role": "owner"
+    }
+  },
+  {
     "method": "DELETE",
     "path": "/api-keys/:id",
     "access": {
@@ -93,6 +109,22 @@
   {
     "method": "GET",
     "path": "/private/owner",
+    "access": {
+      "kind": "role",
+      "role": "owner"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/secrets",
+    "access": {
+      "kind": "role",
+      "role": "owner"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/secrets",
     "access": {
       "kind": "role",
       "role": "owner"

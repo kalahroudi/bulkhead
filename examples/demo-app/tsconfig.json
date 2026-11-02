@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "types": ["@cloudflare/workers-types", "node"] },
-  "include": ["src", "scripts"]
+  "compilerOptions": { "resolveJsonModule": true, "types": ["@cloudflare/workers-types", "node"] },
+  "include": ["src", "scripts", "bulkhead.classification.json"]
 }

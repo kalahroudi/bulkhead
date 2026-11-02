@@ -1,3 +1,4 @@
+import type { Classification } from "../crypto/classification.ts";
 import { TenantStore } from "./store.ts";
 
 interface DOState {
@@ -21,8 +22,11 @@ export function makeTenantObject<B extends abstract new (...args: any[]) => obje
         return { rows, changes: cursor.rowsWritten };
       });
     }
-    async exec(tenantId: string, schema: readonly string[], sql: string, params: unknown[]) {
-      return this.store.run(tenantId, schema, sql, params);
+    async exec(tenantId: string, schema: readonly string[], sql: string, params: unknown[], classification?: Classification) {
+      return this.store.run(tenantId, schema, sql, params, classification);
+    }
+    async nonce(tenantId: string, schema: readonly string[], keyVersion: number, classification?: Classification) {
+      return this.store.nonce(tenantId, schema, keyVersion, classification);
     }
   }
   return TenantObject;
