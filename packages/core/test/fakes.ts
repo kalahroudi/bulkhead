@@ -27,7 +27,10 @@ export function fakeNamespace(): TenantNamespaceLike & { databases: Map<string, 
         return { rows: [], changes: Number(s.run(...(params as never[])).changes) };
       }));
     }
-    return { exec: async (id, schema, sql, params) => stores.get(name)!.run(id, schema, sql, params) };
+    return {
+      exec: async (id, schema, sql, params, classification) => stores.get(name)!.run(id, schema, sql, params, classification),
+      nonce: async (id, schema, keyVersion, classification) => stores.get(name)!.nonce(id, schema, keyVersion, classification),
+    };
   };
   return { databases, idFromName: (n) => n, get: (id) => stubFor(String(id)) };
 }

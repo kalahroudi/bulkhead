@@ -27,9 +27,10 @@ const persist = mkdtempSync(join(tmpdir(), "bulkhead-demo-state-"));
 const logDir = mkdtempSync(join(tmpdir(), "bulkhead-demo-log-"));
 // A fresh bootstrap secret per run: handed to the Worker as a var and to verify through the environment, never written to disk.
 const bootstrapToken = randomBytes(24).toString("hex");
+const masterKey = randomBytes(32).toString("base64"); // fresh per run, like the bootstrap token
 const port = Number(process.env.DEMO_PORT ?? (await freePort()));
 
-const wrangler = spawn(join(demo, "node_modules/.bin/wrangler"), ["dev", "--local", "--ip", "127.0.0.1", "--port", port, "--persist-to", persist, "--var", `BULKHEAD_BOOTSTRAP_TOKEN:${bootstrapToken}`], {
+const wrangler = spawn(join(demo, "node_modules/.bin/wrangler"), ["dev", "--local", "--ip", "127.0.0.1", "--port", port, "--persist-to", persist, "--var", `BULKHEAD_BOOTSTRAP_TOKEN:${bootstrapToken}`, "--var", `BULKHEAD_MASTER_KEY_CURRENT:1`, "--var", `BULKHEAD_MASTER_KEY_V1:${masterKey}`], {
   cwd: demo,
   env: { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "1" },
   stdio: ["ignore", "pipe", "pipe"],
@@ -59,7 +60,7 @@ try {
   }
   const argRules = (() => { const i = process.argv.indexOf("--rules"); return i >= 0 ? process.argv[i + 1] : undefined; })();
   const rules = argRules ?? process.env.VERIFY_RULES ?? "TENANT-1,TENANT-4,TENANT-5";
-  const res = spawnSync(process.execPath, [join(root, "packages/verify/src/cli.ts"), "run", "--target", `http://127.0.0.1:${port}`, "--rules", rules, "--log-dir", logDir], { stdio: "inherit", timeout: 240_000, env: { ...process.env, BULKHEAD_VERIFY_BOOTSTRAP_TOKEN: bootstrapToken } });
+  const res = spawnSync(process.execPath, [join(root, "packages/verify/src/cli.ts"), "run", "--target", `http://127.0.0.1:${port}`, "--rules", rules, "--log-dir", logDir, "--persist-dir", persist, "--route-manifest", join(demo, "route-manifest.json")], { stdio: "inherit", timeout: 240_000, env: { ...process.env, BULKHEAD_VERIFY_BOOTSTRAP_TOKEN: bootstrapToken } });
   if (res.error) console.error(`verify run failed to complete: ${res.error.message}`);
   if (res.status !== 0) console.error("\nwrangler output:\n" + output.split("\n").slice(-15).join("\n"));
   process.exitCode = res.status ?? 1;

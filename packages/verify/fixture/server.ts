@@ -1,6 +1,6 @@
 // Deliberately vulnerable fixture app. Never deploy. Bugs are toggled by FIXTURE_BUGS (comma list, or "all"/"none").
 import { createServer } from "node:http";
-import { createCipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,6 +11,7 @@ const ALL = [
   "session-cross-tenant", "csrf-ignored", "member-can-list-users", "escalation-allowed", "key-revocation-ignored", "disabled-user-can-login",
   "key-secret-unchecked", "bootstrap-token-unchecked", "bootstrap-second-owner", "role-patch-escalation", "admin-modifies-owner", "key-above-minter-role", "listing-leaks-hash", "tenant-from-forwarded-host", "unknown-email-login-errors", "key-secret-length-ignored", "admin-user-create-refused", "listing-leaks-digest", "listing-leaks-token",
   "notes-plaintext-at-rest", "secret-plaintext-at-rest", "plaintext-in-freed-page", "secret-readable-via-list", "secret-readable-via-param-route", "secret-echoed-on-store", "notes-plaintext-on-second", "secret-plaintext-on-second",
+  "aad-ignores-table-field", "shared-data-key", "shred-noop", "shred-rekeys-on-write", "shred-keeps-summary-cache", "shred-destroys-all-tenants", "nonce-reused", "nonce-race", "rotation-ignored", "rotation-orphans-old",
 ];
 const raw = process.env.FIXTURE_BUGS ?? "all";
 const bugs = new Set(raw === "all" ? ALL : raw === "none" ? [] : raw.split(",").filter(Boolean));
@@ -33,42 +34,137 @@ const COOKIE = "__Host-bk_session";
 const token = (n: number) => randomBytes(n).toString("base64url");
 
 // --- at-rest storage (only when FIXTURE_PERSIST_DIR is set): one SQLite file per tenant, WAL mode, classified columns sealed. ---
-// The fixture's own AES-256-GCM envelope `bk1:1:<nonce>:<ct>`; it shares nothing with the real implementation.
+// The fixture's own implementation of the documented envelope `bk1:<keyVersion>:<16-char b64url nonce>:<b64url ct+tag>` (AES-256-GCM,
+// AAD `bulkhead/v1|tenant|table|field|keyVersion`, nonce = 4 zero bytes + 64-bit big-endian per-(tenant,keyVersion) counter kept in the
+// tenant's own database). It shares nothing with the real implementation. Data keys live in memory here, not in the tenant file.
 const PERSIST = process.env.FIXTURE_PERSIST_DIR;
-const DATA_KEY = randomBytes(32);
 const dbs = new Map<string, DatabaseSync>();
-function seal(tenant: string, table: string, field: string, plain: string): string {
-  const nonce = randomBytes(12);
-  const c = createCipheriv("aes-256-gcm", DATA_KEY, nonce);
-  c.setAAD(Buffer.from(`${tenant}|${table}|${field}`));
-  const ct = Buffer.concat([c.update(plain, "utf8"), c.final(), c.getAuthTag()]);
-  return `bk1:1:${nonce.toString("base64url")}:${ct.toString("base64url")}`;
+class Gone extends Error {}
+class CannotOpen extends Error {}
+interface Ring { versions: Map<number, Buffer>; current: number; shredded: boolean }
+const rings = new Map<string, Ring>();
+const GLOBAL_KEYS = new Map<number, Buffer>(); // only used by the shared-data-key bug
+const newRing = (): Ring => ({ versions: new Map([[1, randomBytes(32)]]), current: 1, shredded: false });
+function ringOf(tenant: string): Ring {
+  let r = rings.get(tenant);
+  if (!r) rings.set(tenant, (r = newRing()));
+  if (r.shredded) throw new Gone("tenant data is unavailable");
+  return r;
 }
+function keyFor(tenant: string, ring: Ring, version: number): Buffer {
+  if (bugs.has("shared-data-key")) {
+    let k = GLOBAL_KEYS.get(version);
+    if (!k) GLOBAL_KEYS.set(version, (k = randomBytes(32)));
+    return k;
+  }
+  const k = ring.versions.get(version);
+  if (!k) throw new CannotOpen("no such key version");
+  return k;
+}
+const aad = (tenant: string, table: string, field: string, version: number) =>
+  Buffer.from(bugs.has("aad-ignores-table-field") ? `bulkhead/v1|${tenant}|${version}` : bugs.has("shared-data-key") ? `bulkhead/v1|${table}|${field}|${version}` : `bulkhead/v1|${tenant}|${table}|${field}|${version}`);
 function tenantDb(tenant: string): DatabaseSync | null {
   if (!PERSIST) return null;
   let db = dbs.get(tenant);
   if (!db) {
     mkdirSync(PERSIST, { recursive: true });
-    db = new DatabaseSync(join(PERSIST, `${tenant}.sqlite`));
-    db.exec("pragma journal_mode = wal; create table if not exists notes (id integer primary key autoincrement, text text not null); create table if not exists tenant_secrets (name text primary key, value text not null); create table if not exists scratch (v text)");
+    db = new DatabaseSync(join(PERSIST, `${tenant}.sqlite`), { timeout: 5000 });
+    db.exec("pragma journal_mode = wal; create table if not exists _bulkhead_meta (key text primary key, value text not null); create table if not exists notes (id integer primary key autoincrement, text text not null); create table if not exists tenant_secrets (id text primary key, name text not null, value text not null, created_at integer not null); create table if not exists scratch (v text)");
+    db.prepare("insert or ignore into _bulkhead_meta (key, value) values ('tenant_id', ?)").run(tenant);
     dbs.set(tenant, db);
   }
   return db;
 }
+/** Reserves the next nonce counter for (tenant, keyVersion): one number, never handed out twice. */
+async function reserveNonce(tenant: string, db: DatabaseSync, version: number): Promise<number> {
+  if (bugs.has("nonce-reused")) return 1;
+  const key = `nonce:${version}`;
+  if (bugs.has("nonce-race")) {
+    // Read, yield, then write: two concurrent writes read the same number. The real code does the bump in one statement with no await.
+    const cur = Number((db.prepare("select value from _bulkhead_meta where key = ?").get(key) as { value?: string } | undefined)?.value ?? 0);
+    await new Promise((r) => setImmediate(r));
+    db.prepare("insert or replace into _bulkhead_meta (key, value) values (?, ?)").run(key, String(cur + 1));
+    return cur + 1;
+  }
+  db.prepare("insert into _bulkhead_meta (key, value) values (?, '1') on conflict (key) do update set value = cast(cast(value as integer) + 1 as text)").run(key);
+  return Number((db.prepare("select value from _bulkhead_meta where key = ?").get(key) as { value: string }).value);
+}
+async function seal(tenant: string, db: DatabaseSync, table: string, field: string, plain: string): Promise<string> {
+  const ring = ringOf(tenant);
+  const version = bugs.has("rotation-ignored") ? 1 : ring.current;
+  const counter = await reserveNonce(tenant, db, version);
+  const nonce = Buffer.alloc(12);
+  nonce.writeBigUInt64BE(BigInt(counter), 4);
+  const c = createCipheriv("aes-256-gcm", keyFor(tenant, ring, version), nonce);
+  c.setAAD(aad(tenant, table, field, version));
+  const ct = Buffer.concat([c.update(plain, "utf8"), c.final(), c.getAuthTag()]);
+  return `bk1:${version}:${nonce.toString("base64url")}:${ct.toString("base64url")}`;
+}
+function open(tenant: string, table: string, field: string, sealed: string): string {
+  const m = /^bk1:([1-9][0-9]*):([A-Za-z0-9_-]{16}):([A-Za-z0-9_-]+)$/.exec(sealed);
+  if (!m) throw new CannotOpen("not a sealed value");
+  const version = Number(m[1]);
+  const ring = ringOf(tenant);
+  const raw = Buffer.from(m[3] as string, "base64url");
+  try {
+    const d = createDecipheriv("aes-256-gcm", keyFor(tenant, ring, version), Buffer.from(m[2] as string, "base64url"));
+    d.setAAD(aad(tenant, table, field, version));
+    d.setAuthTag(raw.subarray(raw.length - 16));
+    return Buffer.concat([d.update(raw.subarray(0, raw.length - 16)), d.final()]).toString("utf8");
+  } catch {
+    throw new CannotOpen("cannot open");
+  }
+}
 // Not in the seeded-bug catalog on purpose: these produce UNVERIFIED (the write never lands), which the catalog's fail-lists cannot express. Unit tests use them.
-function persistNote(tenant: string, text: string) {
+async function persistNote(tenant: string, text: string) {
   const db = tenantDb(tenant);
   if (!db) return;
   if (bugs.has("notes-dropped")) return; // creates the tenant database on first use, then stores nothing
-  db.prepare("insert into notes (text) values (?)").run(bugs.has("notes-plaintext-at-rest") || (bugs.has("notes-plaintext-on-second") && notes.filter((n) => n.tenant === tenant).length >= 2) ? text : seal(tenant, "notes", "text", text));
+  const plain = bugs.has("notes-plaintext-at-rest") || (bugs.has("notes-plaintext-on-second") && notes.filter((n) => n.tenant === tenant).length >= 1);
+  db.prepare("insert into notes (text) values (?)").run(plain ? text : await seal(tenant, db, "notes", "text", text));
   if (bugs.has("plaintext-in-freed-page")) {
     db.prepare("insert into scratch (v) values (?)").run(text);
     db.exec("delete from scratch");
   }
 }
-function persistSecret(tenant: string, name: string, value: string) {
+async function persistSecret(tenant: string, name: string, value: string) {
   if (bugs.has("secrets-dropped")) { tenantDb(tenant); return; }
-  tenantDb(tenant)?.prepare("insert or replace into tenant_secrets (name, value) values (?, ?)").run(name, bugs.has("secret-plaintext-at-rest") || (bugs.has("secret-plaintext-on-second") && [...secrets.keys()].filter((k) => k.startsWith(`${tenant}|`)).length >= 2) ? value : seal(tenant, "tenant_secrets", "value", value));
+  const db = tenantDb(tenant);
+  if (!db) return;
+  const plain = bugs.has("secret-plaintext-at-rest") || (bugs.has("secret-plaintext-on-second") && [...secrets.keys()].filter((k) => k.startsWith(`${tenant}|`)).length >= 2);
+  db.prepare("insert into tenant_secrets (id, name, value, created_at) values (?, ?, ?, ?)").run(randomBytes(8).toString("hex"), name, plain ? value : await seal(tenant, db, "tenant_secrets", "value", value), Date.now());
+}
+/** Notes as the app reads them: opened from storage when the fixture persists, else from memory. The missing-tenant-filter bug reads every tenant (that can be read). */
+function readNotes(tenant: string, everyone = false): string[] {
+  if (!PERSIST) return everyone ? notes.map((n) => n.text) : notes.filter((n) => n.tenant === tenant).map((n) => n.text);
+  if (bugs.has("reads-ignore-disk")) { ringOf(tenant); return notes.filter((n) => n.tenant === tenant).map((n) => n.text); } // test-only: the app never sees a change made on disk
+  const out: string[] = [];
+  for (const t of everyone ? [...dbs.keys()] : [tenant]) {
+    try {
+      ringOf(t); // a shredded tenant answers Gone before any row is touched
+      for (const r of tenantDb(t)!.prepare("select text from notes order by id").all() as { text: string }[]) out.push(r.text.startsWith("bk1:") ? open(t, "notes", "text", r.text) : r.text);
+    } catch (e) {
+      if (!everyone || t === tenant) throw e; // the leaky read skips other tenants it cannot open
+    }
+  }
+  return out;
+}
+function rotate(tenant: string): number {
+  const ring = ringOf(tenant);
+  ring.current += 1;
+  ring.versions.set(ring.current, randomBytes(32));
+  if (bugs.has("rotation-orphans-old")) for (const v of [...ring.versions.keys()]) if (v !== ring.current) ring.versions.delete(v);
+  return ring.current;
+}
+function shred(tenant: string) {
+  if (bugs.has("shred-noop")) return;
+  if (bugs.has("shred-destroys-all-tenants")) for (const r of rings.values()) { r.versions.clear(); r.shredded = true; }
+  if (bugs.has("shred-rekeys-on-write")) { rings.delete(tenant); return; } // the key is gone, and so is the record that it was destroyed: the next write mints a fresh one
+  const r = rings.get(tenant) ?? newRing();
+  r.versions.clear();
+  r.shredded = true;
+  rings.set(tenant, r);
+  if (!bugs.has("shred-keeps-summary-cache")) for (const k of [...cache.keys()]) if (k.startsWith(`${tenant}:`) || k === "summary") cache.delete(k);
 }
 const secrets = new Map<string, string>(); // key: tenant|name
 
@@ -116,7 +212,7 @@ function principal(tenant: string, headers: Record<string, string | string[] | u
   return bugs.has("default-role") ? { role: "member", id: "anonymous" } : null;
 }
 
-function authRoute(method: string, path: string, tenant: string, headers: Record<string, string | string[] | undefined>, raw: string): AuthReply | null {
+async function authRoute(method: string, path: string, tenant: string, headers: Record<string, string | string[] | undefined>, raw: string): Promise<AuthReply | null> {
   const json = (): Record<string, unknown> => { try { return JSON.parse(raw || "{}"); } catch { return {}; } };
   const isPublic = path === "/auth/login" || path === "/auth/bootstrap";
   const cookieWrite = headers.cookie !== undefined && !String(headers.authorization ?? "") && method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
@@ -233,6 +329,19 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     if (RANK[p.role] < (bugs.has("member-can-list-users") ? RANK.member : RANK.admin)) return reply(403, { error: "forbidden" });
     return reply(200, { keys: [...keys].filter(([, k]) => k.tenant === tenant).map(([id, k]) => ({ id, role: k.role, permissions: k.permissions, ...(bugs.has("listing-leaks-token") ? { x: token(32) } : {}), ...(bugs.has("listing-leaks-hash") ? { secret_hash: createHash("sha256").update(k.secret).digest("hex") } : {}) })) });
   }
+  // Key lifecycle (CRYPTO-3/4): owner only.
+  if (method === "POST" && (path === "/admin/rotate-key" || path === "/admin/shred")) {
+    const p = principal(tenant, headers);
+    if (!p) return reply(401, { error: "authentication required" });
+    if (RANK[p.role] < RANK.owner) return reply(403, { error: "forbidden" });
+    try {
+      if (path === "/admin/shred") { shred(tenant); return reply(200, { shredded: true }); }
+      return reply(200, { keyVersion: rotate(tenant) });
+    } catch (e) {
+      if (e instanceof Gone) return reply(410, { error: "tenant data is unavailable" });
+      throw e;
+    }
+  }
   // Tenant secrets (CRYPTO-5): a store route, a listing of names, a per-name metadata route. None may ever return the value.
   if (method === "POST" && path === "/secrets") {
     const p = principal(tenant, headers);
@@ -241,7 +350,7 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
     const b = json();
     if (typeof b.name !== "string" || typeof b.value !== "string") return reply(400, { error: "name and value required" });
     secrets.set(`${tenant}|${b.name}`, b.value);
-    persistSecret(tenant, b.name, b.value);
+    try { await persistSecret(tenant, b.name, b.value); } catch (e) { if (e instanceof Gone) return reply(410, { error: "tenant data is unavailable" }); throw e; }
     return reply(201, { id: b.name, name: b.name, ...(bugs.has("secret-echoed-on-store") ? { value: b.value } : {}) });
   }
   if (method === "GET" && path === "/secrets") {
@@ -266,18 +375,18 @@ function authRoute(method: string, path: string, tenant: string, headers: Record
 const server = createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (c: Buffer) => chunks.push(c));
-  req.on("end", () => {
+  req.on("end", async () => {
     const body = Buffer.concat(chunks);
     const send = (status: number, obj: unknown) => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(obj));
     };
+    const failure = (e: unknown) => (e instanceof Gone ? send(410, { error: "tenant data is unavailable" }) : send(500, { error: "internal error" }));
     const tenant = tenantOf(req.headers.host, req.headers["x-tenant"] as string | undefined, req.headers["x-forwarded-host"] as string | undefined);
     if (!tenant) return send(404, { error: "unknown host" });
     const url = new URL(req.url ?? "/", "http://x");
-    const mine = () => notes.filter((n) => n.tenant === tenant).map((n) => n.text);
 
-    const auth = authRoute(req.method ?? "GET", url.pathname, tenant, req.headers, body.toString());
+    const auth = await authRoute(req.method ?? "GET", url.pathname, tenant, req.headers, body.toString());
     if (auth) {
       res.writeHead(auth.status, { "content-type": "application/json", ...(auth.cookie ? { "set-cookie": auth.cookie } : {}) });
       return res.end(JSON.stringify(auth.body));
@@ -286,19 +395,18 @@ const server = createServer((req, res) => {
     if (req.method === "GET" && url.pathname === "/whoami") return send(200, { tenant });
     if (req.method === "POST" && url.pathname === "/notes") {
       const text = String(JSON.parse(body.toString() || "{}").text ?? "");
+      try { await persistNote(tenant, text); } catch (e) { if (e instanceof Gone) return send(410, { error: "tenant data is unavailable" }); throw e; }
       notes.push({ tenant, text });
-      persistNote(tenant, text);
       cache.clear();
       return send(201, { ok: true });
     }
     if (req.method === "GET" && url.pathname === "/notes") {
-      const list = bugs.has("missing-tenant-filter") ? notes.map((n) => n.text) : mine();
-      return send(200, { notes: list });
+      try { return send(200, { notes: readNotes(tenant, bugs.has("missing-tenant-filter")) }); } catch (e) { return failure(e); }
     }
     if (req.method === "GET" && url.pathname === "/summary") {
       const key = bugs.has("shared-cache-key") ? "summary" : `${tenant}:summary`;
       let v = cache.get(key);
-      if (v === undefined) cache.set(key, (v = mine().join(" | ")));
+      try { if (v === undefined) cache.set(key, (v = readNotes(tenant).join(" | "))); } catch (e) { return failure(e); }
       return send(200, { summary: v });
     }
     if (req.method === "POST" && url.pathname === "/webhooks/billing") {

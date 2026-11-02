@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `pnpm dev`. Without master keys the demo refuses to boot (BOOT-1). Generate a key: openssl rand -base64 32
+BULKHEAD_MASTER_KEY_CURRENT=1
+BULKHEAD_MASTER_KEY_V1=replace-with-32-random-bytes-base64
+BULKHEAD_BOOTSTRAP_TOKEN=replace-with-a-long-random-string

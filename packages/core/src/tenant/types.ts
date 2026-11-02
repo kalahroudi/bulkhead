@@ -1,3 +1,6 @@
+import type { Classification } from "../crypto/classification.ts";
+import type { MasterKeys } from "../crypto/keys.ts";
+
 // Structural stand-ins for the Cloudflare bindings core uses, so core typechecks and unit-tests without workers-types.
 export interface D1Like {
   prepare(sql: string): {
@@ -8,7 +11,9 @@ export interface D1Like {
 }
 
 export interface TenantStub {
-  exec(tenantId: string, schema: readonly string[], sql: string, params: unknown[]): Promise<{ rows: Record<string, unknown>[]; changes: number }>;
+  exec(tenantId: string, schema: readonly string[], sql: string, params: unknown[], classification?: Classification): Promise<{ rows: Record<string, unknown>[]; changes: number }>;
+  /** Reserves the next nonce counter for a key version (CRYPTO-4). */
+  nonce(tenantId: string, schema: readonly string[], keyVersion: number, classification?: Classification): Promise<number>;
 }
 
 export interface TenantNamespaceLike {
@@ -31,4 +36,6 @@ export interface Config {
   tenants: TenantNamespaceLike;
   /** Development stopgap until Phase 6 provisioning. Only ever true in development. */
   autoProvision: boolean;
+  /** Present only when the app declares classified data; then required (BOOT-1). */
+  masterKeys?: MasterKeys;
 }

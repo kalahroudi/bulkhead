@@ -1,4 +1,7 @@
 import { Hono } from "hono";
+import type { Classification } from "../crypto/classification.ts";
+import { createSealer, KeyDestroyedError } from "../crypto/keys.ts";
+import { getKeyRing } from "../crypto/ring.ts";
 import { ConfigError, loadConfig } from "../tenant/config.ts";
 import { resolveTenant } from "../tenant/directory.ts";
 import { createTenantDb, type TenantDb } from "../tenant/handle.ts";
@@ -20,6 +23,8 @@ export interface RouteContext {
   readonly tenant: Tenant;
   readonly user: User | null;
   readonly db: TenantDb;
+  /** Key lifecycle for this tenant only (CRYPTO-3/4). Gate it with an owner policy. Throws when the app declares no classified data. */
+  readonly keys: { rotate(): Promise<number>; shred(): Promise<void> };
   readonly req: Request;
   readonly params: Readonly<Record<string, string>>;
   json(body: unknown, status?: number): Response;
@@ -37,6 +42,11 @@ export interface AppOptions {
    * Runs inside the gate, so no handler has run and none receives the handle until it returns.
    */
   authenticate?: (req: Request, tenant: Tenant, db: TenantDb) => Promise<User | null>;
+  /**
+   * The parsed `bulkhead.classification.json`. Declaring it turns on sealing and requires master keys at boot (BOOT-1); every column of every
+   * table must be classified, and sensitive/secret columns must carry `sealedCheck`, or the tenant refuses to initialise (CRYPTO-1).
+   */
+  classification?: Classification;
   /** Plan entitlements arrive in Phase 5. Default denies every feature (fail closed). */
   hasFeature?: (tenant: Tenant, feature: string) => Promise<boolean>;
 }
@@ -52,11 +62,13 @@ export function createApp(options: AppOptions = {}) {
   const hono = new Hono();
   const manifest: ManifestEntry[] = [];
   const schema = options.schema ?? [];
+  const classification = options.classification;
   let config: Config | undefined;
 
   hono.notFound(notFound);
   hono.onError((err) => {
     console.error("request failed", err instanceof Error ? err.name : "error"); // no stack, no message to the client
+    if (err instanceof KeyDestroyedError) return reply(410, "tenant data is unavailable");
     return reply(500, "internal error");
   });
 
@@ -66,12 +78,14 @@ export function createApp(options: AppOptions = {}) {
     manifest.push(toManifestEntry(method, path, checked));
 
     hono.on(method, path, async (c) => {
-      const cfg = (config ??= loadConfig(c.env as Record<string, unknown>));
+      const cfg = (config ??= loadConfig(c.env as Record<string, unknown>, { requireMasterKeys: !!classification }));
       // 1. The hostname picks the tenant. Nothing else is consulted.
       const tenant = await resolveTenant(new URL(c.req.url).hostname, cfg);
       if (!tenant) return notFound();
       // 2. Policy gate, before any handler runs. The scoped handle exists, but only authenticate sees it until the gate passes.
-      const db = createTenantDb(tenant, cfg.tenants, schema);
+      const ring = cfg.masterKeys ? getKeyRing(cfg) : undefined;
+      const db = createTenantDb(tenant, cfg.tenants, schema, classification, ring && classification ? (reserve) => createSealer(tenant.id, ring, classification, reserve) : undefined);
+      const noKeys = () => Promise.reject(new Error("this app declares no classified data, so it has no tenant keys"));
       const user = checked.public ? null : ((await options.authenticate?.(c.req.raw, tenant, db)) ?? null);
       if (!checked.public) {
         if (!user) return reply(401, "authentication required");
@@ -84,6 +98,7 @@ export function createApp(options: AppOptions = {}) {
         tenant,
         user,
         db,
+        keys: { rotate: () => (ring ? ring.rotate(tenant.id) : noKeys()), shred: () => (ring ? ring.shred(tenant.id) : noKeys()) },
         req: c.req.raw,
         params: Object.freeze({ ...c.req.param() }),
         json: (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }),
@@ -98,7 +113,7 @@ export function createApp(options: AppOptions = {}) {
     manifest: (): ManifestEntry[] => [...manifest].sort((a, b) => (a.path + a.method).localeCompare(b.path + b.method)),
     fetch: async (req: Request, env: unknown): Promise<Response> => {
       try {
-        config ??= loadConfig(env as Record<string, unknown>);
+        config ??= loadConfig(env as Record<string, unknown>, { requireMasterKeys: !!classification });
       } catch (e) {
         if (e instanceof ConfigError) {
           console.error("misconfigured:", e.message);

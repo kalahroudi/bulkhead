@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { seededBugs } from "../src/bugs.ts";
 import { EventLog } from "../src/eventlog.ts";
-import { FIXTURE_BOOTSTRAP_TOKEN, runProbes, selectProbes, selfCheck, startFixture, verifyTarget } from "../src/run.ts";
+import { expectedWithAll, FIXTURE_BOOTSTRAP_TOKEN, runProbes, selectProbes, selfCheck, selfCheckFailureIds, startFixture, verifyTarget } from "../src/run.ts";
 import { checkTarget } from "../src/targets.ts";
 import { probes } from "../src/probes.ts";
 import { makeRequester } from "../src/http.ts";
@@ -34,9 +34,8 @@ test("with every bug present, exactly the cataloged probes fail", async () => {
   const fx = await startFixture(seededBugs.map((b) => b.id));
   try {
     const results = await runProbes(fx.url, probes, FIXTURE_BOOTSTRAP_TOKEN, fx.env);
-    assert.deepEqual(results.filter((r) => r.unverified !== undefined).map((r) => r.probe.id), [], "an UNVERIFIED probe is not a probe that failed for the right reason");
-    const failed = results.filter((r) => !r.passed && r.skipped === undefined).map((r) => r.probe.id).sort();
-    assert.deepEqual(failed, [...new Set(seededBugs.flatMap((b) => b.probeIds))].sort());
+    // An unverified probe counts as a mismatch unless the catalog names it (a bug that leaves a probe unable to run).
+    assert.deepEqual(selfCheckFailureIds(results.filter((r) => r.skipped === undefined || r.unverified !== undefined)), expectedWithAll(seededBugs.flatMap((b) => b.probeIds)));
   } finally {
     await fx.stop();
   }

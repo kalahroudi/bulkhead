@@ -148,3 +148,48 @@ export function scanStorage(dir: string, markers: readonly string[], beforeFile?
   }
   return scan;
 }
+
+/** One stored value that has the shape of a sealed envelope (`bk1:` prefix), with enough to find it again. */
+export interface SealedCell {
+  /** Path relative to the inspected directory. */
+  file: string;
+  table: string;
+  column: string;
+  rowid: number;
+  value: string;
+}
+
+/**
+ * Every text cell that starts with `bk1:` in every SQLite file under `dir`, read through SQL on a read-only handle. Used by the
+ * CRYPTO-2 and CRYPTO-4 scenarios to look at envelopes (their key version and nonce) the way an attacker with disk access would.
+ * `incomplete` lists anything that could not be read; callers must not treat a partial list as the whole truth.
+ */
+export function sealedCells(dir: string): { cells: SealedCell[]; incomplete: string[] } {
+  if (!statSync(dir).isDirectory()) throw new Error(`${dir} is not a directory`);
+  const incomplete: string[] = [];
+  const cells: SealedCell[] = [];
+  for (const file of filesUnder(dir, incomplete)) {
+    const path = join(dir, file);
+    let db: DatabaseSync | undefined;
+    try {
+      if (!isSqlite(path)) continue;
+      db = openReadOnly(path);
+      for (const { name } of db.prepare("select name from sqlite_master where type = 'table'").all() as { name: string }[]) {
+        try {
+          // A WITHOUT ROWID table (the runtime's own `_cf_ALARM`) has no rowid: read it plainly, with rowid -1 (it cannot be addressed for a write).
+          let withRowid = true;
+          try { db.prepare(`select rowid from ${ident(name)} limit 0`).all(); } catch { withRowid = false; }
+          for (const row of db.prepare(`select ${withRowid ? 'rowid as "__rid", ' : ""}* from ${ident(name)}`).iterate() as Iterable<Record<string, unknown>>)
+            for (const [col, v] of Object.entries(row)) if (col !== "__rid" && typeof v === "string" && v.startsWith("bk1:")) cells.push({ file, table: name, column: col, rowid: withRowid ? Number(row.__rid) : -1, value: v });
+        } catch (e) {
+          incomplete.push(`${file}: table ${name} unreadable: ${(e as Error).message}`);
+        }
+      }
+    } catch (e) {
+      incomplete.push(`${file}: unreadable: ${(e as Error).message}`);
+    } finally {
+      db?.close();
+    }
+  }
+  return { cells, incomplete };
+}

@@ -1,4 +1,5 @@
 // Control plane (D1): tenants only. Domains and billing state arrive in later phases (TENANT-3).
+import { getKeyRing } from "../crypto/ring.ts";
 import type { Config, D1Like, Tenant } from "./types.ts";
 
 const SLUG = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -34,5 +35,7 @@ export async function resolveTenant(hostname: string, config: Config): Promise<T
   if (config.autoProvision)
     await config.db.prepare("insert or ignore into tenants (id, slug) values (?, ?)").bind(crypto.randomUUID(), slug).run();
   const row = await config.db.prepare("select id, slug from tenants where slug = ? and status = 'active'").bind(slug).first<{ id: string; slug: string }>();
-  return row ? { id: row.id, slug: row.slug } : null;
+  if (!row) return null;
+  if (config.masterKeys) await getKeyRing(config).ensureTenantKey(row.id); // a tenant gets its data key when it is provisioned, never lazily on a write
+  return { id: row.id, slug: row.slug };
 }

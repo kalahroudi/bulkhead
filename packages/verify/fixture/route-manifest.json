@@ -1,5 +1,21 @@
 [
   {
+    "method": "POST",
+    "path": "/admin/rotate-key",
+    "access": {
+      "kind": "role",
+      "role": "owner"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/admin/shred",
+    "access": {
+      "kind": "role",
+      "role": "owner"
+    }
+  },
+  {
     "method": "DELETE",
     "path": "/api-keys/:id",
     "access": {
@@ -97,6 +113,14 @@
   },
   {
     "method": "GET",
+    "path": "/secrets/:name",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "GET",
     "path": "/secrets",
     "access": {
       "kind": "role",
@@ -106,14 +130,6 @@
   {
     "method": "POST",
     "path": "/secrets",
-    "access": {
-      "kind": "role",
-      "role": "admin"
-    }
-  },
-  {
-    "method": "GET",
-    "path": "/secrets/:name",
     "access": {
       "kind": "role",
       "role": "admin"
@@ -128,16 +144,8 @@
     }
   },
   {
-    "method": "GET",
-    "path": "/users",
-    "access": {
-      "kind": "role",
-      "role": "admin"
-    }
-  },
-  {
-    "method": "POST",
-    "path": "/users",
+    "method": "PATCH",
+    "path": "/users/:id/role",
     "access": {
       "kind": "role",
       "role": "admin"
@@ -152,8 +160,16 @@
     }
   },
   {
-    "method": "PATCH",
-    "path": "/users/:id/role",
+    "method": "GET",
+    "path": "/users",
+    "access": {
+      "kind": "role",
+      "role": "admin"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/users",
     "access": {
       "kind": "role",
       "role": "admin"

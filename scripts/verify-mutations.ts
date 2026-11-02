@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Edit, Mutation } from "../packages/verify/src/mutations.ts";
 
-const RULES = "TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4";
+const RULES = "TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4,CRYPTO-1,CRYPTO-2,CRYPTO-3,CRYPTO-4,CRYPTO-5";
 const root = fileURLToPath(new URL("..", import.meta.url)); // decoded, so a path with spaces works
 const only = (() => { const i = process.argv.indexOf("--only"); return i >= 0 ? process.argv[i + 1]?.split(",") : undefined; })();
 
@@ -45,7 +45,7 @@ function unitTests(pkg: string): { passed: boolean; failures: number; crashed: b
   const dir = join(scratch, pkg, "test");
   const files = readdirSync(dir).filter((f) => f.endsWith(".test.ts")).map((f) => join("test", f));
   if (files.length === 0) return { passed: false, failures: 0, crashed: true };
-  const r = spawnSync(process.execPath, ["--test", ...files], { cwd: join(scratch, pkg), encoding: "utf8", timeout: 200_000 });
+  const r = spawnSync(process.execPath, ["--test", "--test-reporter=tap", ...files], { cwd: join(scratch, pkg), encoding: "utf8", timeout: 200_000 });
   const failures = Number(/^# fail (\d+)/m.exec(r.stdout ?? "")?.[1] ?? 0);
   return { passed: r.status === 0, failures, crashed: r.status !== 0 && (failures === 0 || /SyntaxError|ERR_MODULE_NOT_FOUND|ERR_UNSUPPORTED/.test(`${r.stdout}${r.stderr}`)) };
 }
