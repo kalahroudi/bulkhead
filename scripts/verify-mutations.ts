@@ -45,7 +45,7 @@ function unitTests(pkg: string): { passed: boolean; failures: number; crashed: b
   const dir = join(scratch, pkg, "test");
   const files = readdirSync(dir).filter((f) => f.endsWith(".test.ts")).map((f) => join("test", f));
   if (files.length === 0) return { passed: false, failures: 0, crashed: true };
-  const r = spawnSync(process.execPath, ["--test", ...files], { cwd: join(scratch, pkg), encoding: "utf8", timeout: 200_000 });
+  const r = spawnSync(process.execPath, ["--test", "--test-reporter=tap", ...files], { cwd: join(scratch, pkg), encoding: "utf8", timeout: 200_000 });
   const failures = Number(/^# fail (\d+)/m.exec(r.stdout ?? "")?.[1] ?? 0);
   return { passed: r.status === 0, failures, crashed: r.status !== 0 && (failures === 0 || /SyntaxError|ERR_MODULE_NOT_FOUND|ERR_UNSUPPORTED/.test(`${r.stdout}${r.stderr}`)) };
 }
