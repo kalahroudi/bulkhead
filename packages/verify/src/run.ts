@@ -108,11 +108,18 @@ async function failuresAgainst(bugs: string[]): Promise<string[]> {
   }
 }
 
+/** With every bug at once, a probe that one bug leaves unable to run reports UNVERIFIED and no longer reaches its own failure: the unverified outcome masks it. */
+export function expectedWithAll(ids: readonly string[]): string[] {
+  const all = new Set(ids);
+  for (const id of ids) if (id.startsWith("UNVERIFIED:")) all.delete(id.slice("UNVERIFIED:".length));
+  return [...all].sort();
+}
+
 export async function selfCheck(): Promise<SelfCheck> {
   const plan: { name: string; bugs: string[]; expected: string[] }[] = [
     { name: "fixed fixture: no false positives", bugs: [], expected: [] },
     ...seededBugs.map((b) => ({ name: `only ${b.id}`, bugs: [b.id], expected: [...b.probeIds].sort() })),
-    { name: "all bugs", bugs: seededBugs.map((b) => b.id), expected: [...new Set(seededBugs.flatMap((b) => b.probeIds))].sort() },
+    { name: "all bugs", bugs: seededBugs.map((b) => b.id), expected: expectedWithAll(seededBugs.flatMap((b) => b.probeIds)) },
   ];
   const cases: SelfCheckCase[] = [];
   for (const p of plan) {

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Edit, Mutation } from "../packages/verify/src/mutations.ts";
 
-const RULES = "TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4";
+const RULES = "TENANT-1,TENANT-4,TENANT-5,AUTH-1,AUTH-2,AUTH-3,AUTH-4,CRYPTO-1,CRYPTO-2,CRYPTO-3,CRYPTO-4,CRYPTO-5";
 const root = fileURLToPath(new URL("..", import.meta.url)); // decoded, so a path with spaces works
 const only = (() => { const i = process.argv.indexOf("--only"); return i >= 0 ? process.argv[i + 1]?.split(",") : undefined; })();
 

@@ -35,12 +35,13 @@ export interface Mutation {
  */
 export const UNMUTATABLE: Record<string, string> = {
   "forged-signature": "BILL-2: the demo Worker has no billing routes, so the kernel gate skips this probe; billing arrives in Phase 5",
-  "storage-canary-at-rest": "CRYPTO-1 (DR-0010 step a): the probe is built before the code it checks. packages/core/src/crypto/ is empty, the demo has no classified field, so there is no line to break yet. Recorded exemption; the sealing code lands in the crypto port (step b) and its enforcement in step (c), where the mutation entries arrive, and until then the fixture seeded bugs are the only proof this probe can fail",
-  "secret-write-only-readback": "CRYPTO-5 (DR-0010 step a): the probe is built before the code it checks. The demo has no secret store route (step g adds POST /secrets and the tenant_secrets table), so there is no line to break yet. Recorded exemption; the mutation lands with step (g), and until then the fixture seeded bugs are the only proof this probe can fail",
 };
 
 const AUTH = "packages/auth/src/authenticate.ts";
 const ROUTES = "packages/auth/src/routes.ts";
+const KEYS = "packages/core/src/crypto/keys.ts";
+const CLASSIFICATION = "packages/core/src/crypto/classification.ts";
+const DEMO_ROUTES = "examples/demo-app/src/routes.ts";
 
 export const mutations: Mutation[] = [
   {
@@ -153,6 +154,8 @@ export const mutations: Mutation[] = [
       "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling",
       "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "notes-list-canary", "role-change-authority",
       "role-change-revokes", "role-matrix", "unknown-email-login-same-answer",
+      // The CRYPTO probes all bootstrap a fresh owner tenant (or plant into shared storage), so they fail on setup for the same reason.
+      "aad-transplant-fails", "nonce-uniqueness-and-rotation", "secret-write-only-readback", "shredding-makes-data-unreadable", "storage-canary-at-rest",
     ],
   },
   {
@@ -164,8 +167,8 @@ export const mutations: Mutation[] = [
   },
   {
     id: "summary-cached-across-tenants", rule: "TENANT-5", file: "examples/demo-app/src/routes.ts",
-    find: 'c.json({ summary: (await c.db.query<{ text: string }>("select text from notes order by id")).map((r) => r.text).join(" | ") })',
-    replace: 'c.json({ summary: ((globalThis as Record<string, string>).__summary ??= (await c.db.query<{ text: string }>("select text from notes order by id")).map((r) => r.text).join(" | ")) })',
+    find: 'c.json({ summary: (await readNotes(c)).join(" | ") })',
+    replace: 'c.json({ summary: ((globalThis as Record<string, string>).__summary ??= (await readNotes(c)).join(" | ")) })',
     expect: ["cache-canary"],
   },
   {
@@ -236,5 +239,190 @@ export const mutations: Mutation[] = [
     find: "select id, email, role, disabled, created_at from users order by created_at, id",
     replace: "select id, email, role, disabled, created_at, password_hash from users order by created_at, id",
     expect: ["listings-hide-secrets"],
+  },
+
+  // CRYPTO-1..5 (DR-0010 steps c-g). Mutations that keep the app running, so a probe, not a crash, is what kills each one.
+  // A CHECK that no longer rejects plaintext is needed whenever a route is made to store plaintext; the CHECK is a second defence.
+  {
+    id: "notes-stored-plaintext", rule: "CRYPTO-1", file: DEMO_ROUTES,
+    find: 'await c.db.run("insert into notes (text) values (?)", await c.db.seal("notes", "text", body.text));',
+    replace: 'await c.db.run("insert into notes (text) values (?)", body.text);',
+    // The read path would refuse a plaintext row and the CHECK would refuse the insert: both defences are removed so the app keeps running.
+    also: [
+      { file: DEMO_ROUTES, find: 'Promise.all((await c.db.query<{ text: string }>("select text from notes order by id")).map((r) => c.db.open("notes", "text", r.text)))', replace: 'Promise.all((await c.db.query<{ text: string }>("select text from notes order by id")).map((r) => r.text))' },
+      { file: CLASSIFICATION, find: `glob 'bk1:[1-9]*:????????????????:*' and`, replace: `glob '*' and` },
+      { file: CLASSIFICATION, find: `"\${column}" not glob '*[^A-Za-z0-9_:-]*')\``, replace: `"\${column}" not glob '*[^A-Za-z0-9_:-]*' or 1)\`` },
+    ],
+    // Shredding cannot make plaintext unreadable, so the shred scenario fails too (plaintext still readable and in storage).
+    expect: ["shredding-makes-data-unreadable", "storage-canary-at-rest"],
+  },
+  {
+    id: "secret-stored-plaintext", rule: "CRYPTO-1", file: DEMO_ROUTES,
+    find: 'await c.db.seal("tenant_secrets", "value", body.value)',
+    replace: "body.value",
+    also: [
+      { file: CLASSIFICATION, find: `glob 'bk1:[1-9]*:????????????????:*' and`, replace: `glob '*' and` },
+      { file: CLASSIFICATION, find: `"\${column}" not glob '*[^A-Za-z0-9_:-]*')\``, replace: `"\${column}" not glob '*[^A-Za-z0-9_:-]*' or 1)\`` },
+    ],
+    expect: ["shredding-makes-data-unreadable", "storage-canary-at-rest"],
+  },
+  {
+    id: "sealed-check-accepts-plaintext", rule: "CRYPTO-1", file: CLASSIFICATION,
+    find: `glob 'bk1:[1-9]*:????????????????:*' and`,
+    replace: `glob '*' and`,
+    expect: [],
+    gap: "the demo only ever inserts sealed values, so a CHECK that accepts anything changes nothing over HTTP; the database refusing plaintext is a second defence that core unit tests prove (sealing.test.ts)",
+  },
+  {
+    id: "unclassified-column-allowed", rule: "CRYPTO-1", file: CLASSIFICATION,
+    find: "if (!f) throw new ClassificationError(`unclassified column ${key}: the tenant refuses to initialise`);",
+    replace: "if (!f) continue;",
+    expect: [],
+    gap: "the demo classifies every column, so no HTTP request reaches the refusal; core unit tests prove an unclassified column stops the tenant initialising",
+  },
+  {
+    id: "missing-check-allowed", rule: "CRYPTO-1", file: CLASSIFICATION,
+    find: "if (isEncryptedClass(f.class) && !sql.includes(normalise(sealedCheck(col.name))))",
+    replace: "if (false)",
+    expect: [],
+    gap: "the demo declares the CHECK on every sealed column, so no HTTP request reaches the refusal; core unit tests prove a missing CHECK stops the tenant initialising",
+  },
+  {
+    id: "classification-not-enforced-at-init", rule: "CRYPTO-1", file: "packages/core/src/tenant/store.ts",
+    find: "if (classification) enforceClassification(this.exec, classification);",
+    replace: "",
+    expect: [],
+    gap: "the demo's schema is classified correctly, so skipping the init-time enforcement changes nothing over HTTP; core unit tests prove the tenant refuses to initialise",
+  },
+  {
+    id: "stale-classification-allowed", rule: "CRYPTO-1", file: CLASSIFICATION,
+    find: "for (const f of c.fields) if (!columns.has(`${f.table}.${f.field}`)) throw",
+    replace: "for (const f of c.fields) if (false) throw",
+    expect: [],
+    gap: "the demo's classification names only real columns; core unit tests prove a stale entry stops the tenant initialising",
+  },
+  {
+    id: "aad-binds-no-table-or-field", rule: "CRYPTO-2", file: KEYS,
+    find: "const ctx: SealContext = { tenantId, table, field, keyVersion: version };",
+    replace: 'const ctx: SealContext = { tenantId, table: "t", field: "f", keyVersion: version };',
+    // Sealing and opening must agree, or every note would fail to open and a crash, not the probe, would kill the mutation.
+    also: [{ file: KEYS, find: "{ tenantId, table, field, keyVersion: env.keyVersion }, sealed);", replace: '{ tenantId, table: "t", field: "f", keyVersion: env.keyVersion }, sealed);' }],
+    expect: ["aad-transplant-fails"],
+  },
+  {
+    id: "shred-of-keyless-tenant-leaves-no-marker", rule: "CRYPTO-3", file: KEYS,
+    find: "      await ring.ensureTenantKey(tenantId); // a never-keyed tenant still gets marker rows, so a later request cannot mint a fresh key\n",
+    replace: "",
+    expect: [],
+    gap: "every tenant is keyed when it is provisioned (directory.ts), so no demo tenant is keyless at shred time and the marker rows are a second defence no HTTP request reaches; core unit tests prove a never-keyed tenant stays unwritable after shred",
+  },
+  {
+    id: "aad-binds-no-tenant", rule: "CRYPTO-2", file: KEYS,
+    find: "const ctx: SealContext = { tenantId, table, field, keyVersion: version };",
+    replace: 'const ctx: SealContext = { tenantId: "t", table, field, keyVersion: version };',
+    also: [{ file: KEYS, find: "{ tenantId, table, field, keyVersion: env.keyVersion }, sealed);", replace: '{ tenantId: "t", table, field, keyVersion: env.keyVersion }, sealed);' }],
+    expect: [],
+    gap: "every tenant has its own data key, so a cross-tenant transplant still fails on the key even when the AAD omits the tenant; no HTTP scenario separates the two defences, core unit tests cover the AAD at the sealer level",
+  },
+  {
+    id: "nonce-counter-never-advances", rule: "CRYPTO-4", file: "packages/core/src/tenant/store.ts",
+    find: "do update set value = cast(cast(value as integer) + 1 as text)",
+    replace: "do update set value = value",
+    expect: ["nonce-uniqueness-and-rotation"],
+  },
+  {
+    id: "rotation-keeps-stale-current-key", rule: "CRYPTO-4", file: KEYS,
+    find: "      await insertVersion(tenantId, next);\n      latest.delete(tenantId);\n      return next;",
+    replace: "      await insertVersion(tenantId, next);\n      return next;",
+    expect: ["nonce-uniqueness-and-rotation"],
+  },
+  {
+    id: "rotation-destroys-old-versions", rule: "CRYPTO-4", file: KEYS,
+    find: "      await insertVersion(tenantId, next);\n      latest.delete(tenantId);\n      return next;",
+    replace: "      await insertVersion(tenantId, next);\n      latest.delete(tenantId);\n      await db.prepare(\"update tenant_keys set wrapped = null where tenant_id = ? and version < ?\").bind(tenantId, next).run();\n      cache.clear();\n      return next;",
+    expect: ["nonce-uniqueness-and-rotation"],
+  },
+  {
+    id: "rotate-route-announces-without-rotating", rule: "CRYPTO-4", file: DEMO_ROUTES,
+    find: "c.json({ keyVersion: await c.keys.rotate() })",
+    replace: "c.json({ keyVersion: 2 })",
+    // The route also answers 200 for a shredded tenant (no rotation ran, so nothing refused it), which the shred scenario rightly rejects.
+    expect: ["nonce-uniqueness-and-rotation", "shredding-makes-data-unreadable"],
+  },
+  {
+    id: "shred-leaves-keys-wrapped", rule: "CRYPTO-3", file: KEYS,
+    find: "update tenant_keys set wrapped = null, shredded_at = ? where tenant_id = ?",
+    replace: "update tenant_keys set shredded_at = ? where tenant_id = ?",
+    expect: ["shredding-makes-data-unreadable"],
+  },
+  {
+    id: "shred-route-is-a-no-op", rule: "CRYPTO-3", file: DEMO_ROUTES,
+    find: "(await c.keys.shred(), c.json({ shredded: true }))",
+    replace: "c.json({ shredded: true })",
+    expect: ["shredding-makes-data-unreadable"],
+  },
+  {
+    id: "shred-open-to-anonymous", rule: "CRYPTO-3", file: DEMO_ROUTES,
+    find: 'app.route("POST", "/admin/shred", { role: "owner" },',
+    replace: 'app.route("POST", "/admin/shred", DEMO,',
+    expect: ["shredding-makes-data-unreadable"],
+  },
+  {
+    id: "shredded-tenant-is-rekeyed", rule: "CRYPTO-3", file: KEYS,
+    find: "if ((await rows(tenantId)).length === 0) await insertVersion(tenantId, 1);",
+    replace: "{ const have = await rows(tenantId); if (have.every((r) => r.wrapped === null)) await insertVersion(tenantId, have.length + 1); }",
+    // The 60-second ensure memo would hide the re-mint inside the gate's window; the memo is a speed-up, not a defence.
+    also: [{ file: KEYS, find: "      ensured.set(tenantId, now() + ttlMs);\n", replace: "" }],
+    expect: ["shredding-makes-data-unreadable"],
+  },
+  {
+    id: "rotation-of-shredded-tenant-allowed", rule: "CRYPTO-3", file: KEYS,
+    find: "if (all.length === 0 || all.some((r) => r.wrapped === null)) throw new KeyUnavailableError(\"tenant key destroyed or absent\");",
+    replace: "if (all.length === 0) throw new KeyUnavailableError(\"tenant key destroyed or absent\");",
+    expect: ["shredding-makes-data-unreadable"],
+  },
+  {
+    id: "key-unavailable-is-a-500", rule: "CRYPTO-3", file: "packages/core/src/api/app.ts",
+    find: 'if (err instanceof KeyUnavailableError) return reply(410, "tenant data is unavailable");',
+    replace: "",
+    expect: ["shredding-makes-data-unreadable"],
+  },
+  {
+    id: "write-only-refusal-removed", rule: "CRYPTO-5", file: KEYS,
+    find: "if (opening && f.writeOnly) throw new CryptoError(`${table}.${field} is write-only`);",
+    replace: "",
+    expect: [],
+    gap: "no demo route opens a write-only field, so removing the handle's refusal changes nothing over HTTP on its own; core unit tests prove the handle refuses; the next entry shows the probe catches the end-to-end read-back",
+  },
+  {
+    id: "secret-listing-returns-value", rule: "CRYPTO-5", file: DEMO_ROUTES,
+    find: 'c.json({ secrets: await c.db.query("select id, name, created_at from tenant_secrets order by created_at") })',
+    replace: 'c.json({ secrets: await Promise.all((await c.db.query<{ id: string; name: string; value: string; created_at: number }>("select id, name, value, created_at from tenant_secrets order by created_at")).map(async (r) => ({ ...r, value: await c.db.open("tenant_secrets", "value", r.value) }))) })',
+    // Two defences are broken together: the route that returns the value, and the handle's write-only refusal.
+    also: [{ file: KEYS, find: "if (opening && f.writeOnly) throw new CryptoError(`${table}.${field} is write-only`);", replace: "" }],
+    expect: ["secret-write-only-readback"],
+  },
+  {
+    id: "unsealed-field-can-be-sealed", rule: "CRYPTO-1", file: KEYS,
+    find: "if (!f || !isEncryptedClass(f.class)) throw new CryptoError(`${table}.${field} is not a sealed field`);",
+    replace: "if (!f) throw new CryptoError(`${table}.${field} is not a sealed field`);",
+    expect: [],
+    gap: "the demo seals only classified fields, so the sealer's own class check is never reached over HTTP; core unit tests prove unsealed fields cannot be sealed",
+  },
+  {
+    id: "master-key-length-unchecked", rule: "BOOT-1", file: KEYS,
+    find: "if (bytes.length !== 32) throw new MasterKeyError(`${name} must be exactly 32 bytes`);",
+    replace: "",
+    expect: [],
+    gap: "BOOT-1 is a boot-time refusal that the HTTP verify cannot trigger (the gate always supplies good keys); core unit tests cover it, and the launcher-level boot check (scripts/verify-boot.ts) is the builder's, not claimed here",
+  },
+  {
+    id: "master-keys-not-required-at-boot", rule: "BOOT-1", file: "packages/core/src/api/app.ts",
+    find: "const cfg = (config ??= loadConfig(c.env as Record<string, unknown>, { requireMasterKeys: !!classification }));",
+    replace: "const cfg = (config ??= loadConfig(c.env as Record<string, unknown>));",
+    also: [{ file: "packages/core/src/api/app.ts", find: "config ??= loadConfig(env as Record<string, unknown>, { requireMasterKeys: !!classification });", replace: "config ??= loadConfig(env as Record<string, unknown>);" }],
+    // Not a BOOT-1 check (the boot refusal is the launcher-level gate, scripts/verify-boot.ts, not claimed here): without the keys loaded the app has no
+    // sealing at all, so every probe that stores or reads a sealed field fails. It shows these probes notice an app that lost its key hierarchy.
+    expect: ["aad-transplant-fails", "add-tenant-metamorphic", "cache-canary", "nonce-uniqueness-and-rotation", "notes-list-canary", "secret-write-only-readback", "shredding-makes-data-unreadable", "storage-canary-at-rest"],
   },
 ];

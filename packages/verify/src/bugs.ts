@@ -2,12 +2,15 @@
 export interface SeededBug {
   id: string;
   description: string;
-  /** Every probe that must fail when only this bug is present, and no others. */
+  /**
+   * Every probe that must fail when only this bug is present, and no others. `UNVERIFIED:<probe>` names a probe the bug leaves unable to
+   * run (for example the envelope probes when a column is stored as plaintext): that is a mismatch to the self-check unless listed here.
+   */
   probeIds: string[];
 }
 
 export const seededBugs: SeededBug[] = [
-  { id: "missing-tenant-filter", description: "GET /notes returns every tenant's notes", probeIds: ["add-tenant-metamorphic", "notes-list-canary"] },
+  { id: "missing-tenant-filter", description: "GET /notes returns every tenant's notes", probeIds: ["add-tenant-metamorphic", "notes-list-canary", "UNVERIFIED:aad-transplant-fails"] },
   { id: "shared-cache-key", description: "Summary cache key omits the tenant", probeIds: ["cache-canary"] },
   { id: "skipped-signature-check", description: "Billing webhook accepted without a valid signature", probeIds: ["forged-signature"] },
   { id: "tenant-from-header", description: "Tenant taken from a client-supplied x-tenant header", probeIds: ["identity-header-differential"] },
@@ -38,12 +41,22 @@ export const seededBugs: SeededBug[] = [
   { id: "admin-user-create-refused", description: "POST /users refuses every admin with 403, so an admin's denials on role changes prove nothing (the positive control must catch this)", probeIds: ["role-change-authority"] },
   { id: "listing-leaks-digest", description: "GET /users carries a neutrally named field (digest) holding a 64-hex-digit string", probeIds: ["listings-hide-secrets"] },
   { id: "listing-leaks-token", description: "GET /api-keys carries a neutrally named field (x) holding a 43-character base64url token", probeIds: ["listings-hide-secrets"] },
-  { id: "notes-plaintext-at-rest", description: "The classified notes.text column is stored as plaintext instead of a sealed value", probeIds: ["storage-canary-at-rest"] },
-  { id: "secret-plaintext-at-rest", description: "A stored tenant secret is written to its column as plaintext instead of a sealed value", probeIds: ["storage-canary-at-rest"] },
-  { id: "plaintext-in-freed-page", description: "Notes are sealed in their column, but the plaintext is also written to a scratch row that is then deleted: no column holds it, yet it survives in database pages and the WAL (only the raw byte scan sees it)", probeIds: ["storage-canary-at-rest"] },
-  { id: "secret-readable-via-list", description: "GET /secrets returns each stored secret's value", probeIds: ["secret-write-only-readback"] },
-  { id: "secret-readable-via-param-route", description: "GET /secrets/:name returns the stored secret's value (found only by filling the path parameter)", probeIds: ["secret-write-only-readback"] },
+  { id: "notes-plaintext-at-rest", description: "The classified notes.text column is stored as plaintext instead of a sealed value", probeIds: ["storage-canary-at-rest", "shredding-makes-data-unreadable", "UNVERIFIED:aad-transplant-fails", "UNVERIFIED:nonce-uniqueness-and-rotation"] },
+  { id: "secret-plaintext-at-rest", description: "A stored tenant secret is written to its column as plaintext instead of a sealed value", probeIds: ["storage-canary-at-rest", "shredding-makes-data-unreadable", "UNVERIFIED:aad-transplant-fails", "UNVERIFIED:nonce-uniqueness-and-rotation"] },
+  { id: "plaintext-in-freed-page", description: "Notes are sealed in their column, but the plaintext is also written to a scratch row that is then deleted: no column holds it, yet it survives in database pages and the WAL (only the raw byte scan sees it)", probeIds: ["storage-canary-at-rest", "shredding-makes-data-unreadable"] },
+  { id: "secret-readable-via-list", description: "GET /secrets returns each stored secret's value", probeIds: ["secret-write-only-readback", "shredding-makes-data-unreadable"] },
+  { id: "secret-readable-via-param-route", description: "GET /secrets/:name returns the stored secret's value (found only by filling the path parameter)", probeIds: ["secret-write-only-readback", "shredding-makes-data-unreadable"] },
   { id: "secret-echoed-on-store", description: "POST /secrets echoes the stored value in its response", probeIds: ["secret-write-only-readback"] },
-  { id: "notes-plaintext-on-second", description: "The first note of a tenant is sealed but every later one is stored as plaintext, so only the probe's second plant exposes it", probeIds: ["storage-canary-at-rest"] },
-  { id: "secret-plaintext-on-second", description: "The first secret of a tenant is sealed but every later one is stored as plaintext", probeIds: ["storage-canary-at-rest"] },
+  { id: "notes-plaintext-on-second", description: "The first note of a tenant is sealed but every later one is stored as plaintext, so only the probe's second plant exposes it", probeIds: ["storage-canary-at-rest", "shredding-makes-data-unreadable", "UNVERIFIED:aad-transplant-fails", "UNVERIFIED:nonce-uniqueness-and-rotation"] },
+  { id: "secret-plaintext-on-second", description: "The first secret of a tenant is sealed but every later one is stored as plaintext", probeIds: ["storage-canary-at-rest", "shredding-makes-data-unreadable", "UNVERIFIED:nonce-uniqueness-and-rotation"] },
+  { id: "aad-ignores-table-field", description: "The AAD binds tenant and key version but not table or field: a secret's envelope moved into the notes column opens as a note", probeIds: ["aad-transplant-fails"] },
+  { id: "shared-data-key", description: "One data key for every tenant and an AAD without the tenant: a ciphertext moved to another tenant's database opens there", probeIds: ["aad-transplant-fails"] },
+  { id: "shred-noop", description: "POST /admin/shred answers shredded but destroys nothing: the tenant's notes still read back", probeIds: ["shredding-makes-data-unreadable"] },
+  { id: "shred-rekeys-on-write", description: "Shredding deletes the key without recording that it did: the next write mints a fresh key and succeeds", probeIds: ["shredding-makes-data-unreadable"] },
+  { id: "shred-keeps-summary-cache", description: "The shred destroys the key but a warmed GET /summary cache keeps serving the tenant's plaintext", probeIds: ["shredding-makes-data-unreadable"] },
+  { id: "shred-destroys-all-tenants", description: "Shredding one tenant destroys every tenant's keys", probeIds: ["shredding-makes-data-unreadable"] },
+  { id: "nonce-reused", description: "Every seal uses nonce counter 1 under the same key", probeIds: ["nonce-uniqueness-and-rotation"] },
+  { id: "nonce-race", description: "The nonce counter is read, then written after a yield, so concurrent writes reserve the same nonce", probeIds: ["nonce-uniqueness-and-rotation"] },
+  { id: "rotation-ignored", description: "Rotation announces a new key version but new writes keep sealing under the old one", probeIds: ["nonce-uniqueness-and-rotation"] },
+  { id: "rotation-orphans-old", description: "Rotation destroys the previous key version: notes sealed before it no longer open", probeIds: ["nonce-uniqueness-and-rotation"] },
 ];

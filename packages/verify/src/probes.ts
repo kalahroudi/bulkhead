@@ -1,7 +1,8 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { Oracle } from "@kalahroudi/bulkhead-spec";
 import type { Requester, Response } from "./http.ts";
-import { fingerprintStorage, scanStorage, storageChanged } from "./inspector.ts";
+import { fingerprintStorage, scanStorage, sealedCells, storageChanged, type SealedCell } from "./inspector.ts";
+import { overwriteCell } from "./tamper.ts";
 import { canaryOracle, differentialOracle, metamorphicOracle, roleDifferentialOracle, specOracle, storageCanaryOracle, type Verdict } from "./oracles.ts";
 
 /** One entry of the committed route manifest (ROUTE-2). Verify reads the JSON file; it never imports the app that wrote it. */
@@ -78,6 +79,15 @@ const PARAM = new RegExp(PARAM_ALL.source);
  */
 const SECRET_STORE = { method: "POST", path: "/secrets" } as const;
 const hasStoreRoute = (routes: ManifestRoute[] | undefined) => !!routes?.some((r) => r.method === SECRET_STORE.method && r.path === SECRET_STORE.path);
+
+
+/** Key lifecycle routes of a target (DR-0010 step e/f): POST /admin/shred and POST /admin/rotate-key, both owner-only. */
+const SHRED_ROUTE = "/admin/shred";
+const ROTATE_ROUTE = "/admin/rotate-key";
+const hasRoute = (routes: ManifestRoute[] | undefined, method: string, path: string) => !routes || routes.some((r) => r.method === method && r.path === path);
+const ENVELOPE = /^bk1:([1-9][0-9]*):([A-Za-z0-9_-]{16}):([A-Za-z0-9_-]+)$/;
+const cellKey = (c: SealedCell) => `${c.file}|${c.table}|${c.column}|${c.rowid}`;
+const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
 
 /** A throwaway tenant with an owner who is signed in. Every step must succeed or the probe fails (setup is not a pass). */
 async function ownerTenant({ req, host, bootstrapToken }: Context, name: string, reproduction: string) {
@@ -964,6 +974,297 @@ export const probes: Probe[] = [
       if (verdict.passed && unreached.length) return unverified(`parameter route(s) never gave the owner a 2xx for any fill value tried (the secret's name and id), so the lookup may not have run: ${unreached.join(", ")}`, reproduction);
       if (verdict.passed && secretRelated === 0) return unverified(`${trulyExercised} route(s) answered the owner with a 2xx, but none is secret-related (no path mentions secrets and no response carried the stored secret's name or id), so the places a secret could surface were not read`, reproduction);
       return { ...verdict, evidence: verdict.passed ? `secret absent from the store response and from ${exercised} read-back request(s). Limits: GET/HEAD routes in the manifest only; parameter routes filled with the secret's name and id only; write routes that might echo a secret were not exercised` : verdict.evidence, reproduction };
+    },
+  },
+  {
+    id: "aad-transplant-fails",
+    ruleId: "CRYPTO-2",
+    scenario: "crypto/aad-transplant-fails",
+    oracle: "spec",
+    async run(ctx) {
+      const { req, host, persistDir } = ctx;
+      const reproduction = `Tenant A (an owner): store secret S via POST /secrets, and notes N1 and N2 via POST /notes. Tenant B: store note B1. Read each stored envelope from the persisted tenant files (read-only), then, with the app still running, overwrite one cell at a time on disk: (control) A's N2 := A's N1 (same tenant, table and field), (1) A's N2 := A's secret envelope (other table), (2) B's B1 := A's N1 (other tenant), (3) B's B1 := A's secret envelope. After each, GET /notes as that tenant: the transplanted plaintext must not appear. Restore every cell afterwards.`;
+      if (!persistDir) return unverified("no persisted-storage directory supplied (--persist-dir); a transplant needs the tenant files on disk, so CRYPTO-2 is unverified on this target", reproduction);
+      if (!ctx.routes) return unverified("no route manifest supplied (--route-manifest); cannot tell whether the target has the secret store route the transplant uses, so CRYPTO-2 is unverified", reproduction);
+      if (!hasStoreRoute(ctx.routes)) return unverified(`the manifest has no ${SECRET_STORE.method} ${SECRET_STORE.path}; without a second classified table the cross-table transplant cannot run, so CRYPTO-2 is unverified on this target`, reproduction);
+      const cannot = (e: unknown) => unverified(`persisted-storage directory could not be read: ${(e as Error).message}`, reproduction);
+      const snapshot = () => sealedCells(persistDir);
+      /** Plants through `plant`, then returns the one sealed cell that appeared. Anything else (none, several, an unreadable directory) cannot be attributed. */
+      const planted = async (what: string, plant: () => Promise<Response>): Promise<{ cell: SealedCell } | { error: Verdict & { reproduction: string } }> => {
+        let before;
+        try { before = snapshot(); } catch (e) { return { error: cannot(e) }; }
+        const res = await plant();
+        const broken = requireSetup(res, `planting the ${what}`, reproduction);
+        if (broken) return { error: broken };
+        let after;
+        try { after = snapshot(); } catch (e) { return { error: cannot(e) }; }
+        if (after.incomplete.length) return { error: unverified(`the storage scan was incomplete (${after.incomplete.join("; ")}); the sealed value of the ${what} cannot be located`, reproduction) };
+        const known = new Set(before.cells.map(cellKey));
+        const fresh = after.cells.filter((c) => !known.has(cellKey(c)));
+        if (fresh.length !== 1) return { error: unverified(`planting the ${what} produced ${fresh.length} new sealed value(s) in the persisted storage, expected exactly 1; the stored envelope cannot be attributed (the write did not land, or the target does not store a bk1 envelope)`, reproduction) };
+        return { cell: fresh[0] as SealedCell };
+      };
+      const a = await ownerTenant(ctx, "tx-a", reproduction);
+      if ("error" in a && a.error) return a.error;
+      const ownerA = a as Extract<typeof a, { h: string }>;
+      const hostB = host(`tx-b-${randomBytes(3).toString("hex")}`);
+      const S = marker(), N1 = marker(), N2 = marker(), B1 = marker(), B2 = marker();
+      const secretP = await planted("secret", () => req(ownerA.h, "POST", SECRET_STORE.path, { ...cookieWrite(ownerA.h, ownerA.token), body: json({ name: `tx-${randomBytes(3).toString("hex")}`, value: S }) }));
+      if ("error" in secretP) return secretP.error;
+      const n1P = await planted("first note of tenant A", () => req(ownerA.h, "POST", "/notes", { body: json({ text: N1 }) }));
+      if ("error" in n1P) return n1P.error;
+      const n2P = await planted("second note of tenant A", () => req(ownerA.h, "POST", "/notes", { body: json({ text: N2 }) }));
+      if ("error" in n2P) return n2P.error;
+      const b1P = await planted("first note of tenant B", () => req(hostB, "POST", "/notes", { body: json({ text: B1 }) }));
+      if ("error" in b1P) return b1P.error;
+      const b2 = await req(hostB, "POST", "/notes", { body: json({ text: B2 }) });
+      const brokenB2 = requireSetup(b2, "planting the second note of tenant B", reproduction);
+      if (brokenB2) return brokenB2;
+      const [secretCell, n1, n2, b1] = [secretP.cell, n1P.cell, n2P.cell, b1P.cell];
+      if (new Set([secretCell.file, n1.file, n2.file]).size !== 1 || b1.file === n1.file) return unverified(`could not attribute the stored envelopes to two distinct tenant files (A: ${[secretCell.file, n1.file, n2.file].join(", ")}; B: ${b1.file})`, reproduction);
+      if (secretCell.table === n1.table && secretCell.column === n1.column) return unverified("the secret and the note are stored in the same column; there is no second classified field to transplant between", reproduction);
+
+      const writes: { cell: SealedCell; original: string }[] = [];
+      const put = (cell: SealedCell, value: string) => {
+        if (!writes.some((w) => w.cell === cell)) writes.push({ cell, original: cell.value });
+        return overwriteCell(persistDir, cell, value);
+      };
+      const restore = () => { for (const w of writes) overwriteCell(persistDir, w.cell, w.original); writes.length = 0; };
+      const checks: { name: string; ok: boolean; detail: string }[] = [];
+      let rowBound = false;
+      try {
+        const base = await req(ownerA.h, "GET", "/notes");
+        if (base.status < 200 || base.status >= 300 || !base.body.includes(N1) || !base.body.includes(N2)) return fail(`before any tampering, GET /notes as tenant A did not return both planted notes (HTTP ${base.status} ${base.body.slice(0, 200)}); the app is not working, so a transplant result would mean nothing`, reproduction);
+        // Tenant isolation is another rule's business. If B already sees A's data before any tamper, a later leak could not be told apart from it.
+        const baseB = await req(hostB, "GET", "/notes");
+        if (baseB.status < 200 || baseB.status >= 300 || [N1, N2, S].some((x) => baseB.body.includes(x)) || ![B1, B2].every((x) => baseB.body.includes(x))) return unverified(`before any tampering, tenant B's GET /notes did not return exactly its own notes (HTTP ${baseB.status}); isolation or the read path is already broken, so a transplant leak could not be told apart from it`, reproduction);
+        // Control: the same transplant within one tenant, table and field. If the running app does not see a cell written on disk, every later "failed to open" is meaningless.
+        const w0 = put(n2, n1.value);
+        if (!w0.ok) return unverified(`could not write into the tenant database on disk (${w0.detail}); no transplant can be tried`, reproduction);
+        const same = await req(ownerA.h, "GET", "/notes");
+        if (same.status >= 200 && same.status < 300 && countOf(same.body, N1) >= 2) { /* control: the app reads through what we wrote, and opens an envelope in its own context */ }
+        else {
+          rowBound = true; // the app also binds the row (stronger than the spec's three fields): the control cannot show the write reached the app
+          restore();
+          const healthy = await req(ownerA.h, "GET", "/notes");
+          if (healthy.status < 200 || healthy.status >= 300 || !healthy.body.includes(N1) || !healthy.body.includes(N2)) return unverified(`the same-context control failed (HTTP ${same.status}) and the app did not recover after the cell was restored (HTTP ${healthy.status}); the tamper channel cannot be trusted`, reproduction);
+        }
+        restore();
+
+        const attempts: { name: string; target: SealedCell; value: string; asTenant: string; forbidden: string; detail: string }[] = [
+          { name: "other table, same tenant (A's secret envelope in A's notes column)", target: n2, value: secretCell.value, asTenant: ownerA.h, forbidden: S, detail: "the secret's plaintext was returned from the notes column" },
+          { name: "other tenant (A's note envelope in B's notes column)", target: b1, value: n1.value, asTenant: hostB, forbidden: N1, detail: "tenant A's note plaintext was returned to tenant B" },
+          { name: "other tenant and table (A's secret envelope in B's notes column)", target: b1, value: secretCell.value, asTenant: hostB, forbidden: S, detail: "tenant A's secret plaintext was returned to tenant B" },
+        ];
+        for (const t of attempts) {
+          const w = put(t.target, t.value);
+          if (!w.ok) return unverified(`could not write into the tenant database on disk for "${t.name}" (${w.detail})`, reproduction);
+          const r = await req(t.asTenant, "GET", "/notes");
+          checks.push({ name: t.name, ok: !r.body.includes(t.forbidden), detail: `${t.detail} (HTTP ${r.status})` });
+          restore();
+        }
+        const afterA = await req(ownerA.h, "GET", "/notes");
+        const afterB = await req(hostB, "GET", "/notes");
+        for (const [who, r, need] of [["A", afterA, [N1, N2]], ["B", afterB, [B1, B2]]] as const)
+          if (r.status < 200 || r.status >= 300 || !need.every((x) => r.body.includes(x))) return unverified(`after restoring every cell, tenant ${who} did not read back its own notes (HTTP ${r.status}); the restore failed or the tamper left the app broken`, reproduction);
+      } finally {
+        restore();
+      }
+      const verdict = specOracle(checks);
+      if (!verdict.passed) return { ...verdict, reproduction };
+      return { ...verdict, evidence: `${checks.length} transplant(s) failed to open or leaked nothing${rowBound ? "; the app also binds the row (the same-context row swap was refused)" : ""}. Limits: AAD binding of the tenant is not separable from the per-tenant data key over HTTP (a cross-tenant transplant fails on the key even if the tenant were missing from the AAD), this scenario does not vary the field or the key version (the demo has one classified column per table), and the spec's AAD does not bind the row${rowBound ? "" : " (the control shows a row swap within one column opens)"}`, reproduction };
+    },
+  },
+  {
+    id: "shredding-makes-data-unreadable",
+    ruleId: "CRYPTO-3",
+    scenario: "crypto/shredding-makes-data-unreadable",
+    oracle: "state",
+    async run(ctx) {
+      const { req, host, persistDir, routes } = ctx;
+      const reproduction = `Tenant A (owner): store notes C1, C2 and secret S; warm GET /summary. Tenant B stores note CB. Anonymous POST ${SHRED_ROUTE} must be refused. Then the owner shreds A via POST ${SHRED_ROUTE}. Afterwards, as anonymous and as owner, GET /notes must answer 410 and no GET route may return C1, C2, S; a new POST /notes and POST /secrets on A must not succeed (no new key may be minted) and POST ${ROTATE_ROUTE} must not succeed; tenant B must still read CB and write; a tenant that never stored anything, once shredded, must also refuse a first write. Finally scan the persisted storage for every canary.`;
+      if (!persistDir) return unverified("no persisted-storage directory supplied (--persist-dir); CRYPTO-3 is verified on a local target only (DR-0010 choice 7), so it is unverified here", reproduction);
+      if (!hasRoute(routes, "POST", SHRED_ROUTE)) return unverified(`the manifest has no POST ${SHRED_ROUTE}; the target has no way to shred a tenant, so CRYPTO-3 is unverified`, reproduction);
+      const a = await ownerTenant(ctx, "shred-a", reproduction);
+      if ("error" in a && a.error) return a.error;
+      const ownerA = a as Extract<typeof a, { h: string }>;
+      const c = await ownerTenant(ctx, "shred-c", reproduction);
+      if ("error" in c && c.error) return c.error;
+      const ownerC = c as Extract<typeof c, { h: string }>;
+      const hostB = host(`shred-b-${randomBytes(3).toString("hex")}`);
+      const C1 = marker(), C2 = marker(), S = marker(), CB = marker(), LATE = marker(), LATE_SECRET = marker(), LATE_C = marker(), LATE_B = marker();
+      const opts = cookieWrite(ownerA.h, ownerA.token);
+      for (const [what, res] of [
+        ["note C1", await req(ownerA.h, "POST", "/notes", { body: json({ text: C1 }) })],
+        ["note C2", await req(ownerA.h, "POST", "/notes", { body: json({ text: C2 }) })],
+        ["secret S", await req(ownerA.h, "POST", SECRET_STORE.path, { ...opts, body: json({ name: "shred-probe-secret", value: S }) })],
+        ["note CB", await req(hostB, "POST", "/notes", { body: json({ text: CB }) })],
+      ] as const) {
+        if (what === "secret S" && res.status === 404 && !hasStoreRoute(routes)) continue; // no secret store on this target: the notes half still runs
+        const broken = requireSetup(res, `planting ${what}`, reproduction);
+        if (broken) return broken;
+      }
+      const hasSecrets = hasStoreRoute(routes) || (await req(ownerA.h, "GET", "/secrets", withCookie(ownerA.token))).status === 200;
+      const pre = await req(ownerA.h, "GET", "/notes");
+      const preSummary = await req(ownerA.h, "GET", "/summary"); // warms any derived cache with the plaintext
+      const preB = await req(hostB, "GET", "/notes");
+      if (pre.status !== 200 || !pre.body.includes(C1) || !pre.body.includes(C2)) return fail(`before the shred, GET /notes as tenant A did not return its notes (HTTP ${pre.status} ${pre.body.slice(0, 200)}); nothing to shred`, reproduction);
+      if (preB.status !== 200 || !preB.body.includes(CB)) return fail(`before the shred, GET /notes as tenant B did not return its note (HTTP ${preB.status})`, reproduction);
+      const checks: { name: string; ok: boolean; detail: string }[] = [];
+      const canaries = [C1, C2, S, LATE, LATE_SECRET];
+      const leaks = (body: string) => canaries.filter((x) => body.includes(x));
+      const refused = (r: Response) => r.status >= 400 && r.status < 500;
+
+      const anon = await req(ownerA.h, "POST", SHRED_ROUTE);
+      checks.push({ name: `anonymous POST ${SHRED_ROUTE}`, ok: refused(anon), detail: `an unauthenticated caller was not refused (HTTP ${anon.status})` });
+      const still = await req(ownerA.h, "GET", "/notes");
+      if (still.status !== 200 || !still.body.includes(C1)) checks.push({ name: "tenant after anonymous shred attempt", ok: false, detail: `the refused shred still changed the tenant (HTTP ${still.status})` });
+
+      const shred = await req(ownerA.h, "POST", SHRED_ROUTE, opts);
+      if (shred.status === 404 || shred.status === 405) return unverified(`POST ${SHRED_ROUTE} answered ${shred.status}; the target has no shred route, so CRYPTO-3 is unverified`, reproduction);
+      const brokenShred = requireSetup(shred, "the owner's shred", reproduction);
+      if (brokenShred) return brokenShred;
+
+      const reads = async (label: string, who: "anonymous" | "owner") => {
+        const o = who === "owner" ? withCookie(ownerA.token) : {};
+        const notes = await req(ownerA.h, "GET", "/notes", o);
+        checks.push({ name: `${label}: ${who} GET /notes`, ok: notes.status === 410 && leaks(notes.body).length === 0, detail: `expected 410 Gone and no plaintext, got HTTP ${notes.status}${leaks(notes.body).length ? ` carrying ${leaks(notes.body).join(", ")}` : ""}` });
+        const seen: Response[] = [notes];
+        // Every other GET route the target declares (parameters filled with the secret's name): none may return a canary, whatever its status.
+        const extra = [...new Set(["/summary", "/secrets", ...(routes ?? []).filter((r) => r.method === "GET").map((r) => r.path)])].filter((p) => p !== "/notes");
+        for (const p of extra) {
+          const path = p.replace(PARAM_ALL, () => encodeURIComponent("shred-probe-secret"));
+          const r = await req(ownerA.h, "GET", path, o);
+          seen.push(r);
+          checks.push({ name: `${label}: ${who} GET ${path}`, ok: leaks(r.body).length === 0 && !JSON.stringify(r.headers).includes(S), detail: `plaintext found (HTTP ${r.status}): ${leaks(r.body).join(", ")}` });
+        }
+        return seen;
+      };
+      await reads("after shred", "anonymous");
+      await reads("after shred", "owner");
+
+      const lateNote = await req(ownerA.h, "POST", "/notes", { body: json({ text: LATE }) });
+      checks.push({ name: "write to the shredded tenant: POST /notes", ok: lateNote.status === 410, detail: `a shredded tenant accepted or mishandled a write (expected 410 Gone, got HTTP ${lateNote.status}): no new key may be minted` });
+      if (hasSecrets) {
+        const lateSecret = await req(ownerA.h, "POST", SECRET_STORE.path, { ...opts, body: json({ name: "late", value: LATE_SECRET }) });
+        checks.push({ name: "write to the shredded tenant: POST /secrets", ok: lateSecret.status === 410, detail: `a shredded tenant accepted or mishandled a secret write (expected 410 Gone, got HTTP ${lateSecret.status})` });
+      }
+      if (hasRoute(routes, "POST", ROTATE_ROUTE)) {
+        const rot = await req(ownerA.h, "POST", ROTATE_ROUTE, opts);
+        checks.push({ name: `rotation on the shredded tenant: POST ${ROTATE_ROUTE}`, ok: rot.status >= 400 && rot.status !== 404 && rot.status !== 405, detail: `rotation of a shredded tenant must not succeed or mint a key (HTTP ${rot.status})` });
+      }
+      await reads("after a later write", "anonymous");
+
+      // A tenant that never stored anything has no key row to destroy; shredding it must still leave it unwritable.
+      const shredC = await req(ownerC.h, "POST", SHRED_ROUTE, cookieWrite(ownerC.h, ownerC.token));
+      const brokenC = requireSetup(shredC, "shredding a tenant that never stored data", reproduction);
+      if (brokenC) return brokenC;
+      const lateC = await req(ownerC.h, "POST", "/notes", { body: json({ text: LATE_C }) });
+      checks.push({ name: "write to a shredded tenant that never stored data", ok: lateC.status === 410, detail: `a never-keyed tenant, once shredded, accepted a write (expected 410, got HTTP ${lateC.status}): a fresh key was minted` });
+      canaries.push(LATE_C);
+      const readC = await req(ownerC.h, "GET", "/notes");
+      checks.push({ name: "read of that tenant", ok: !readC.body.includes(LATE_C), detail: `the write refused above is readable (HTTP ${readC.status} ${readC.body.slice(0, 120)})` }); // an empty 200 is truthful here: the tenant holds no rows, so no key is needed to read it
+
+      // Shredding is per tenant: B keeps its data and its ability to write, and never sees A's plaintext.
+      const postB = await req(hostB, "GET", "/notes");
+      checks.push({ name: "tenant B after A's shred: GET /notes", ok: postB.status === 200 && postB.body.includes(CB) && leaks(postB.body).length === 0, detail: `tenant B lost its data or saw tenant A's (HTTP ${postB.status} ${postB.body.slice(0, 160)})` });
+      const writeB = await req(hostB, "POST", "/notes", { body: json({ text: LATE_B }) });
+      checks.push({ name: "tenant B after A's shred: POST /notes", ok: writeB.status >= 200 && writeB.status < 300, detail: `shredding A broke writes for tenant B (HTTP ${writeB.status})` });
+
+      let scan;
+      try { scan = scanStorage(persistDir, [...canaries, CB, LATE_B]); } catch (e) { return unverified(`persisted-storage directory could not be read: ${(e as Error).message}`, reproduction); }
+      const stored = scan.hits.filter((h) => canaries.includes(h.marker));
+      checks.push({ name: "persisted storage after the shred", ok: stored.length === 0, detail: `plaintext found in storage: ${stored.map((h) => `${h.layer} ${h.file} ${h.where}`).join(", ")}` });
+      const verdict = specOracle(checks);
+      if (!verdict.passed) return { ...verdict, reproduction };
+      if (scan.sqliteOpened === 0 || scan.rowsScanned === 0) return unverified(`no SQLite rows under ${persistDir}; the storage half of the scenario saw nothing, so the absence of plaintext means nothing`, reproduction);
+      if (scan.incomplete.length) return unverified(`the storage scan was incomplete (${scan.incomplete.join("; ")}); a pass would overstate what was inspected`, reproduction);
+      void preSummary;
+      return { ...verdict, evidence: `${checks.length} checks: after the shred every read path refused tenant A (410) or returned no plaintext, writes and rotation were refused (no new key), tenant B was unaffected, and no plaintext is in ${scan.filesScanned} stored file(s). Not covered: the data-key cache window (up to 60 s in other isolates; this run shreds and reads in the same isolate, so a stale key in another isolate is not exercised), backups, and a re-read after the window has elapsed`, reproduction };
+    },
+  },
+  {
+    id: "nonce-uniqueness-and-rotation",
+    ruleId: "CRYPTO-4",
+    scenario: "crypto/nonce-uniqueness-and-rotation",
+    oracle: "spec",
+    async run(ctx) {
+      const { req, persistDir, routes } = ctx;
+      const reproduction = `On a fresh tenant (owner), store 24 notes and 4 secrets concurrently. Read every stored envelope from the persisted tenant file (read-only): no (keyVersion, nonce) pair may repeat. Then POST ${ROTATE_ROUTE} as the owner (an anonymous call must be refused), store 16 more notes and 2 secrets concurrently: the new envelopes must carry a higher key version, still never repeat a (keyVersion, nonce) pair of the whole tenant, and GET /notes must still return every earlier and later note.`;
+      if (!persistDir) return unverified("no persisted-storage directory supplied (--persist-dir); envelopes cannot be read over HTTP, so CRYPTO-4 is unverified on this target", reproduction);
+      if (!hasRoute(routes, "POST", ROTATE_ROUTE)) return unverified(`the manifest has no POST ${ROTATE_ROUTE}; the target has no way to rotate, so CRYPTO-4 is unverified`, reproduction);
+      const hasSecrets = hasStoreRoute(routes);
+      const t = await ownerTenant(ctx, "nonce", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const owner = t as Extract<typeof t, { h: string }>;
+      const opts = cookieWrite(owner.h, owner.token);
+      const noteMarkers: string[] = [];
+      const burst = async (notes: number, secretCount: number) => {
+        const sent: Promise<Response>[] = [];
+        for (let i = 0; i < notes; i++) { const m = marker(); noteMarkers.push(m); sent.push(req(owner.h, "POST", "/notes", { body: json({ text: m }) })); }
+        if (hasSecrets) for (let i = 0; i < secretCount; i++) sent.push(req(owner.h, "POST", SECRET_STORE.path, { ...opts, body: json({ name: `n-${randomBytes(4).toString("hex")}`, value: marker() }) }));
+        return Promise.all(sent);
+      };
+      const expectedCells = (notes: number, secretCount: number) => notes + (hasSecrets ? secretCount : 0);
+      let before;
+      try { before = sealedCells(persistDir); } catch (e) { return unverified(`persisted-storage directory could not be read: ${(e as Error).message}`, reproduction); }
+      const known = new Set(before.cells.map(cellKey));
+
+      const first = await burst(24, 4);
+      const brokenFirst = first.map((r) => requireSetup(r, "a concurrent write", reproduction)).find(Boolean);
+      if (brokenFirst) return brokenFirst;
+      let mid;
+      try { mid = sealedCells(persistDir); } catch (e) { return unverified(`persisted-storage directory could not be read: ${(e as Error).message}`, reproduction); }
+      const fresh1 = mid.cells.filter((c) => !known.has(cellKey(c)));
+      const files1 = [...new Set(fresh1.map((c) => c.file))];
+      if (mid.incomplete.length) return unverified(`the storage scan was incomplete (${mid.incomplete.join("; ")})`, reproduction);
+      if (files1.length !== 1 || fresh1.length !== expectedCells(24, 4)) return unverified(`${expectedCells(24, 4)} writes succeeded but the persisted storage gained ${fresh1.length} sealed value(s) in ${files1.length} file(s); the envelopes cannot be attributed to this tenant (writes did not land, or the target does not store bk1 envelopes)`, reproduction);
+      const tenantFile = files1[0] as string;
+      const parse = (cells: SealedCell[]) => cells.map((c) => ({ c, m: ENVELOPE.exec(c.value) }));
+      const checks: { name: string; ok: boolean; detail: string }[] = [];
+      const malformed = parse(mid.cells.filter((c) => c.file === tenantFile)).filter((p) => !p.m);
+      checks.push({ name: "envelope shape", ok: malformed.length === 0, detail: `${malformed.length} stored value(s) are not bk1:<keyVersion>:<nonce>:<ciphertext> envelopes` });
+      const pairs = (cells: SealedCell[]) => {
+        const seen = new Map<string, number>();
+        for (const p of parse(cells)) if (p.m) seen.set(`${p.m[1]}:${p.m[2]}`, (seen.get(`${p.m[1]}:${p.m[2]}`) ?? 0) + 1);
+        return { seen, dups: [...seen].filter(([, n]) => n > 1).map(([k, n]) => `${k} x${n}`) };
+      };
+      const cells1 = mid.cells.filter((c) => c.file === tenantFile);
+      const p1 = pairs(cells1);
+      checks.push({ name: `nonce uniqueness over ${cells1.length} concurrent writes`, ok: p1.dups.length === 0, detail: `(keyVersion:nonce) pairs reused under one tenant key: ${p1.dups.slice(0, 5).join(", ")}` });
+      const v0 = new Set(parse(cells1).map((p) => p.m && Number(p.m[1])));
+      const oldVersion = Math.max(...[...v0].map((v) => v ?? 0));
+
+      const anon = await req(owner.h, "POST", ROTATE_ROUTE);
+      checks.push({ name: `anonymous POST ${ROTATE_ROUTE}`, ok: anon.status >= 400 && anon.status < 500, detail: `an unauthenticated caller was not refused (HTTP ${anon.status})` });
+      const rot = await req(owner.h, "POST", ROTATE_ROUTE, opts);
+      if (rot.status === 404 || rot.status === 405) return unverified(`POST ${ROTATE_ROUTE} answered ${rot.status}; the target has no rotation route`, reproduction);
+      const brokenRot = requireSetup(rot, "the owner's key rotation", reproduction);
+      if (brokenRot) return brokenRot;
+      let announced: number | undefined;
+      try { const v = (JSON.parse(rot.body) as { keyVersion?: unknown }).keyVersion; if (typeof v === "number") announced = v; } catch { /* the body need not be JSON */ }
+      checks.push({ name: "rotation announces a newer version", ok: announced === undefined || announced > oldVersion, detail: `rotation answered key version ${announced}, not above the version in use (${oldVersion})` });
+
+      const second = await burst(16, 2);
+      const brokenSecond = second.map((r) => requireSetup(r, "a write after rotation", reproduction)).find(Boolean);
+      if (brokenSecond) return brokenSecond;
+      let end;
+      try { end = sealedCells(persistDir); } catch (e) { return unverified(`persisted-storage directory could not be read: ${(e as Error).message}`, reproduction); }
+      const all = end.cells.filter((c) => c.file === tenantFile);
+      const known1 = new Set(cells1.map(cellKey));
+      const fresh2 = all.filter((c) => !known1.has(cellKey(c)));
+      if (fresh2.length !== expectedCells(16, 2)) return unverified(`${expectedCells(16, 2)} writes after rotation succeeded but the tenant's file gained ${fresh2.length} sealed value(s)`, reproduction);
+      const newVersions = [...new Set(parse(fresh2).map((p) => (p.m ? Number(p.m[1]) : 0)))];
+      checks.push({ name: "writes after rotation use the new key version", ok: newVersions.every((v) => v > oldVersion) && (announced === undefined || newVersions.every((v) => v === announced)), detail: `new envelopes carry key version(s) ${newVersions.join(", ")}; version ${oldVersion} was in use and rotation answered ${announced}` });
+      const pAll = pairs(all);
+      checks.push({ name: `nonce uniqueness over all ${all.length} envelopes across the rotation`, ok: pAll.dups.length === 0, detail: `(keyVersion:nonce) pairs reused: ${pAll.dups.slice(0, 5).join(", ")}` });
+      const read = await req(owner.h, "GET", "/notes");
+      const missing = noteMarkers.filter((m) => !read.body.includes(m));
+      checks.push({ name: "every note, before and after rotation, still reads back", ok: read.status === 200 && missing.length === 0, detail: `GET /notes answered HTTP ${read.status}; ${missing.length} of ${noteMarkers.length} notes missing (data lost to rotation)` });
+      const verdict = specOracle(checks);
+      if (!verdict.passed) return { ...verdict, reproduction };
+      if (end.incomplete.length) return unverified(`the storage scan was incomplete (${end.incomplete.join("; ")})`, reproduction);
+      return { ...verdict, evidence: `${all.length} envelopes, key versions ${[...new Set([...v0, ...newVersions])].join(", ")}, no (keyVersion, nonce) pair repeated; all ${noteMarkers.length} notes read back after rotation. Limits: uniqueness is observed over this burst, not proven; counter semantics are not asserted; the key version is taken from the envelope header; one rotation only; concurrency is as deep as one burst`, reproduction };
     },
   },
 ];

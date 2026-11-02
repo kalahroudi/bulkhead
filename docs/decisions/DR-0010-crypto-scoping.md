@@ -1,6 +1,6 @@
 # DR-0010: Phase 4 crypto scoping (CRYPTO-1..5): design, order of work and open questions
 
-- Status: proposed (owner answered all six open questions in session on 2026-10-14; the owner has not yet marked this record accepted, so no crypto work starts)
+- Status: accepted (owner, 2026-11-02; signature pending)
 - Date: 2026-10-13
 - Rules: CRYPTO-1, CRYPTO-2, CRYPTO-3, CRYPTO-4, CRYPTO-5, BOOT-1
 

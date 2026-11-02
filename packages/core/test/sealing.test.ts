@@ -183,3 +183,28 @@ test("enforceClassification can be called on its own", () => {
   s.db.exec(SCHEMA.join(";"));
   enforceClassification((q, p) => { const st = s.db.prepare(q); return { rows: st.all(...(p as never[])) as never, changes: 0 }; }, CLASSIFICATION);
 });
+
+test("CRYPTO-2: the tenant is part of the AAD at the sealer level, even when two tenants share one key", async () => {
+  const { createSealer } = await import("../src/crypto/index.ts");
+  const db = fakeD1();
+  const ring = createKeyRing(db, loadMasterKeys(KEYS));
+  await ring.ensureTenantKey("a");
+  const shared = { current: (_: string) => ring.current("a"), get: (_: string, v: number) => ring.get("a", v) } as unknown as Parameters<typeof createSealer>[1];
+  let n = 0;
+  const reserve = async () => ++n;
+  const a = createSealer("a", shared, CLASSIFICATION, reserve);
+  const b = createSealer("b", shared, CLASSIFICATION, reserve);
+  const sealed = await a.seal("notes", "text", "for a only");
+  assert.equal(await a.open("notes", "text", sealed), "for a only");
+  await assert.rejects(() => b.open("notes", "text", sealed), /cannot open/);
+});
+
+test("CRYPTO-3: shredding a tenant that was never keyed still leaves marker rows, so it is never keyed afterwards", async () => {
+  const db = fakeD1();
+  const ring = createKeyRing(db, loadMasterKeys(KEYS));
+  await ring.shred("fresh");
+  await assert.rejects(() => ring.current("fresh"), KeyUnavailableError);
+  await assert.rejects(() => createKeyRing(db, loadMasterKeys(KEYS)).current("fresh"), KeyUnavailableError); // another isolate
+  const rows = db.raw.prepare("select wrapped from tenant_keys where tenant_id = 'fresh'").all() as { wrapped: unknown }[];
+  assert.ok(rows.length > 0 && rows.every((r) => r.wrapped === null));
+});
