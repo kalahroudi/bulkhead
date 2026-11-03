@@ -1,0 +1,11 @@
+{
+  "name": "bulkhead-demo-betterauth",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  // Better Auth uses AsyncLocalStorage (DR-0011).
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "BULKHEAD_TENANT", "class_name": "TenantObject" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantObject"] }],
+  "d1_databases": [{ "binding": "BULKHEAD_DB", "database_name": "bulkhead-demo-betterauth", "database_id": "00000000-0000-0000-0000-000000000000" }],
+  "vars": { "BULKHEAD_ENV": "development", "BULKHEAD_BASE_DOMAIN": "demo.localhost", "BULKHEAD_AUTO_PROVISION": "true" }
+}

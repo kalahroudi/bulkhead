@@ -1,0 +1,20 @@
+{
+  "name": "@kalahroudi/bulkhead-auth-betterauth",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DR-0011 spike: Better Auth behind Bulkhead's authenticate hook. Not wired into the demo; not published.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@kalahroudi/bulkhead-auth": "workspace:*",
+    "@kalahroudi/bulkhead-core": "workspace:*",
+    "better-auth": "1.7.15"
+  }
+}

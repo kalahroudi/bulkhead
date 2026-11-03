@@ -1,16 +1,29 @@
 // Demo routes. Kept free of `cloudflare:workers` imports so the manifest can be generated under Node.
 import { createAuth } from "@kalahroudi/bulkhead-auth";
 import { createApp } from "@kalahroudi/bulkhead-core/api";
-import { parseClassification, sealedCheck } from "@kalahroudi/bulkhead-core/crypto";
+import { parseClassification, sealedCheck, type ClassifiedField } from "@kalahroudi/bulkhead-core/crypto";
 import classificationFile from "../bulkhead.classification.json" with { type: "json" };
 
 const DEMO = { public: { reason: "demo route used by the verify probes; real apps declare roles" } } as const;
 
+/** The shape of an auth implementation the demo can run on: the shipped one by default, or another (DR-0011 spike) passed in. */
+export interface AuthKit {
+  schema: readonly string[];
+  authenticate: NonNullable<Parameters<typeof createApp>[0]>["authenticate"];
+  registerRoutes(app: ReturnType<typeof createApp>): void;
+  /** Classification of the kit's own tables. Omitted for the shipped kit, whose tables are classified in bulkhead.classification.json. */
+  fields?: readonly ClassifiedField[];
+}
+
+const SHIPPED_AUTH_TABLES = new Set(["users", "sessions", "api_keys", "login_attempts"]);
+
 /** `bootstrapToken` is read per request from the Worker's env (see index.ts); undefined disables first-owner bootstrap. */
-export function createDemoApp(bootstrapToken: () => string | undefined = () => undefined) {
-  const auth = createAuth({ bootstrapToken });
+export function createDemoApp(bootstrapToken: () => string | undefined = () => undefined, kit?: AuthKit) {
+  const auth: AuthKit = kit ?? createAuth({ bootstrapToken });
+  const own = parseClassification(classificationFile);
+  const classification = kit?.fields ? parseClassification({ version: 1, fields: [...own.fields.filter((f) => !SHIPPED_AUTH_TABLES.has(f.table)), ...kit.fields] }) : own;
   const app = createApp({
-    classification: parseClassification(classificationFile),
+    classification,
     schema: [
       ...auth.schema,
       `create table notes (id integer primary key autoincrement, text text not null ${sealedCheck("text")})`,

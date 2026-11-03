@@ -22,7 +22,10 @@ function freePort(): Promise<number> {
 }
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const demo = join(root, "examples/demo-app");
+// `--app examples/demo-betterauth` runs the same probes against another example Worker (the DR-0011 spike). The default is the demo.
+const appArg = (() => { const i = process.argv.indexOf("--app"); return i >= 0 ? process.argv[i + 1] : undefined; })();
+const demo = join(root, appArg ?? "examples/demo-app");
+const extraVars = appArg ? ["--var", `BULKHEAD_AUTH_SECRET:${randomBytes(32).toString("base64url")}`] : []; // fresh per run, like the other secrets
 const persist = mkdtempSync(join(tmpdir(), "bulkhead-demo-state-"));
 const logDir = mkdtempSync(join(tmpdir(), "bulkhead-demo-log-"));
 // A fresh bootstrap secret per run: handed to the Worker as a var and to verify through the environment, never written to disk.
@@ -30,7 +33,7 @@ const bootstrapToken = randomBytes(24).toString("hex");
 const masterKey = randomBytes(32).toString("base64"); // fresh per run, like the bootstrap token
 const port = Number(process.env.DEMO_PORT ?? (await freePort()));
 
-const wrangler = spawn(join(demo, "node_modules/.bin/wrangler"), ["dev", "--local", "--ip", "127.0.0.1", "--port", port, "--persist-to", persist, "--var", `BULKHEAD_BOOTSTRAP_TOKEN:${bootstrapToken}`, "--var", `BULKHEAD_MASTER_KEY_CURRENT:1`, "--var", `BULKHEAD_MASTER_KEY_V1:${masterKey}`], {
+const wrangler = spawn(join(demo, "node_modules/.bin/wrangler"), ["dev", "--local", "--ip", "127.0.0.1", "--port", port, "--persist-to", persist, "--var", `BULKHEAD_BOOTSTRAP_TOKEN:${bootstrapToken}`, "--var", `BULKHEAD_MASTER_KEY_CURRENT:1`, "--var", `BULKHEAD_MASTER_KEY_V1:${masterKey}`, ...extraVars], {
   cwd: demo,
   env: { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "1" },
   stdio: ["ignore", "pipe", "pipe"],
