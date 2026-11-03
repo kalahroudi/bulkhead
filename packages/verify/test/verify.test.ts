@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { seededBugs } from "../src/bugs.ts";
 import { EventLog } from "../src/eventlog.ts";
-import { expectedWithAll, FIXTURE_BOOTSTRAP_TOKEN, runProbes, selectProbes, selfCheck, selfCheckFailureIds, startFixture, verifyTarget } from "../src/run.ts";
+import { describeCase, expectedWithAll, FIXTURE_BOOTSTRAP_TOKEN, runProbes, selectProbes, selfCheck, selfCheckFailureIds, startFixture, verifyTarget } from "../src/run.ts";
 import { checkTarget } from "../src/targets.ts";
 import { probes } from "../src/probes.ts";
 import { makeRequester } from "../src/http.ts";
@@ -220,4 +220,25 @@ test("the listing secret-shape checks catch leaks the old needle list cannot see
       await fx.stop();
     }
   }
+});
+
+test("a failing self-check case is reported with its name, expectation and actual failures, and the real check is untouched", async () => {
+  // Force a mismatch through the injectable expectation: the fixed fixture is told to expect a failure it will not have.
+  const sc = await selfCheck((name, expected) => (name === "fixed fixture: no false positives" ? ["notes-list-canary"] : expected));
+  assert.equal(sc.valid, false);
+  const bad = sc.cases.filter((c) => !c.ok);
+  assert.equal(bad.length, 1, "only the forced case may fail");
+  const line = describeCase(bad[0]!);
+  assert.match(line, /fixed fixture: no false positives/);
+  assert.match(line, /expected failures \[notes-list-canary\]/);
+  assert.match(line, /but got \[\]/);
+  // And without the injection the same check is valid.
+  assert.equal((await selfCheck()).valid, true);
+});
+
+test("a self-check case that could not run says which case it was and why", () => {
+  const line = describeCase({ name: "only some-bug", bugs: ["some-bug"], expectedFailures: [], actualFailures: [], ok: false, error: "fixture exited early (1)" });
+  assert.match(line, /only some-bug/);
+  assert.match(line, /bugs: some-bug/);
+  assert.match(line, /could not run: fixture exited early \(1\)/);
 });

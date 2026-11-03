@@ -11,11 +11,14 @@ export interface Requester {
   (host: string, method: string, path: string, opts?: { body?: string; headers?: Record<string, string> }): Promise<Response>;
 }
 
+/** Idle-socket timeout per request. Targets hash passwords (PBKDF2) and a loaded machine runs the gate's workers in parallel, so 5 s was close enough to flake; a hung target still fails, 30 s later. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
 export function makeRequester(target: URL): Requester {
   return (host, method, path, opts = {}) =>
     new Promise((resolve, reject) => {
       const req = request(
-        { host: target.hostname, port: target.port, method, path, headers: { host, ...(opts.body ? { "content-length": String(Buffer.byteLength(opts.body)), "content-type": "application/json" } : {}), ...opts.headers }, timeout: 5000 },
+        { host: target.hostname, port: target.port, method, path, headers: { host, ...(opts.body ? { "content-length": String(Buffer.byteLength(opts.body)), "content-type": "application/json" } : {}), ...opts.headers }, timeout: REQUEST_TIMEOUT_MS },
         (res) => {
           const chunks: Buffer[] = [];
           res.on("data", (c: Buffer) => chunks.push(c));
