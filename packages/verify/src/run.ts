@@ -92,6 +92,13 @@ export interface SelfCheckCase {
   expectedFailures: string[];
   actualFailures: string[];
   ok: boolean;
+  /** Set when the case could not run at all (the fixture did not start, a probe run threw): the message names this case. */
+  error?: string;
+}
+
+/** One line for a self-check case that is not ok: its name, what was expected, what happened. Shared by the CLI's selfcheck and run commands. */
+export function describeCase(c: SelfCheckCase): string {
+  return `self-check case "${c.name}" (bugs: ${c.bugs.length ? c.bugs.join(",") : "none"}): ${c.error !== undefined ? `could not run: ${c.error}` : `expected failures [${c.expectedFailures}] but got [${c.actualFailures}]`}`;
 }
 
 export interface SelfCheck {
@@ -123,7 +130,8 @@ export function expectedWithAll(ids: readonly string[]): string[] {
   return [...all].sort();
 }
 
-export async function selfCheck(): Promise<SelfCheck> {
+/** `adjustExpected` exists so a test can force a mismatch and see it reported; the real check never passes it. */
+export async function selfCheck(adjustExpected: (caseName: string, expected: string[]) => string[] = (_n, e) => e): Promise<SelfCheck> {
   const plan: { name: string; bugs: string[]; expected: string[] }[] = [
     { name: "fixed fixture: no false positives", bugs: [], expected: [] },
     ...seededBugs.map((b) => ({ name: `only ${b.id}`, bugs: [b.id], expected: [...b.probeIds].sort() })),
@@ -131,8 +139,14 @@ export async function selfCheck(): Promise<SelfCheck> {
   ];
   const cases: SelfCheckCase[] = [];
   for (const p of plan) {
-    const actual = await failuresAgainst(p.bugs);
-    cases.push({ name: p.name, bugs: p.bugs, expectedFailures: p.expected, actualFailures: actual, ok: JSON.stringify(actual) === JSON.stringify(p.expected) });
+    const expected = adjustExpected(p.name, p.expected);
+    try {
+      const actual = await failuresAgainst(p.bugs);
+      cases.push({ name: p.name, bugs: p.bugs, expectedFailures: expected, actualFailures: actual, ok: JSON.stringify(actual) === JSON.stringify(expected) });
+    } catch (e) {
+      // Name the case: a bare "fixture exited early" or "request timed out" says nothing about which bug set was running.
+      cases.push({ name: p.name, bugs: p.bugs, expectedFailures: expected, actualFailures: [], ok: false, error: (e as Error).message });
+    }
   }
   const found = seededBugs.filter((b) => cases.find((c) => c.bugs.length === 1 && c.bugs[0] === b.id)?.ok).length;
   return { valid: cases.every((c) => c.ok), cases, seededBugsFound: found, seededBugsTotal: seededBugs.length };

@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { spec } from "@kalahroudi/bulkhead-spec";
 import { EventLog } from "./eventlog.ts";
-import { LIMITS, selectProbes, selfCheck, verifyTarget } from "./run.ts";
+import { describeCase, LIMITS, selectProbes, selfCheck, verifyTarget } from "./run.ts";
 import { parseManifest, probes, type TargetEnv } from "./probes.ts";
 import { checkTarget } from "./targets.ts";
 import { resolveTargetOverrides } from "./target-env.ts";
@@ -24,7 +24,7 @@ if (cmd === "selfcheck") {
   const log = new EventLog(dir, "verify");
   const sc = await selfCheck();
   log.append("verify.run", { phase: "selfcheck", valid: sc.valid, seededBugsFound: sc.seededBugsFound, seededBugsTotal: sc.seededBugsTotal });
-  for (const c of sc.cases) console.log(`${c.ok ? "ok  " : "FAIL"} ${c.name}${c.ok ? "" : `: expected [${c.expectedFailures}] got [${c.actualFailures}]`}`);
+  for (const c of sc.cases) console.log(c.ok ? `ok   ${c.name}` : `FAIL ${describeCase(c)}`);
   console.log(`Seeded bugs caught: ${sc.seededBugsFound}/${sc.seededBugsTotal}. Oracle ${sc.valid ? "healthy" : "INVALID"}.`);
   process.exit(sc.valid ? 0 : 1);
 } else if (cmd === "run") {
@@ -41,7 +41,11 @@ if (cmd === "selfcheck") {
     Object.assign(env, resolveTargetOverrides({ manifestPath: values["route-manifest"], cookieName: values["cookie-name"], hostSuffix: values["host-suffix"], webhookSecret: values["webhook-secret"] }));
   } catch (e) { console.error(`refused: ${(e as Error).message}`); process.exit(2); }
   const report = await verifyTarget(target, new EventLog(dir, "verify"), rules, process.env.BULKHEAD_VERIFY_BOOTSTRAP_TOKEN, env);
-  if (!report.valid) { console.error("run INVALID: oracle self-check failed"); process.exit(1); }
+  if (!report.valid) {
+    console.error("run INVALID: oracle self-check failed");
+    for (const k of report.selfCheck.cases.filter((x) => !x.ok)) console.error(`  ${describeCase(k)}`);
+    process.exit(1);
+  }
   for (const r of report.results) {
     if (r.unverified !== undefined) console.log(`UNVERIFIED ${r.probe.ruleId} ${r.probe.id}: ${r.unverified}`);
     else if (r.skipped !== undefined) console.log(`skip  ${r.probe.ruleId} ${r.probe.id}: ${r.skipped}`);
