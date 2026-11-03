@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "fields": [
+    {
+      "table": "users",
+      "field": "id",
+      "class": "internal"
+    },
+    {
+      "table": "users",
+      "field": "email",
+      "class": "personal"
+    },
+    {
+      "table": "users",
+      "field": "password_hash",
+      "class": "internal"
+    },
+    {
+      "table": "users",
+      "field": "role",
+      "class": "internal"
+    },
+    {
+      "table": "users",
+      "field": "disabled",
+      "class": "internal"
+    },
+    {
+      "table": "users",
+      "field": "created_at",
+      "class": "internal"
+    },
+    {
+      "table": "sessions",
+      "field": "token_hash",
+      "class": "internal"
+    },
+    {
+      "table": "sessions",
+      "field": "user_id",
+      "class": "internal"
+    },
+    {
+      "table": "sessions",
+      "field": "created_at",
+      "class": "internal"
+    },
+    {
+      "table": "sessions",
+      "field": "last_seen",
+      "class": "internal"
+    },
+    {
+      "table": "sessions",
+      "field": "expires_at",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "id",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "secret_hash",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "name",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "role",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "permissions",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "created_by",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "created_at",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "expires_at",
+      "class": "internal"
+    },
+    {
+      "table": "api_keys",
+      "field": "revoked_at",
+      "class": "internal"
+    },
+    {
+      "table": "login_attempts",
+      "field": "email",
+      "class": "personal"
+    },
+    {
+      "table": "login_attempts",
+      "field": "at",
+      "class": "internal"
+    },
+    {
+      "table": "memos",
+      "field": "id",
+      "class": "public"
+    },
+    {
+      "table": "memos",
+      "field": "body",
+      "class": "sensitive"
+    },
+    {
+      "table": "vault_entries",
+      "field": "id",
+      "class": "public"
+    },
+    {
+      "table": "vault_entries",
+      "field": "label",
+      "class": "internal"
+    },
+    {
+      "table": "vault_entries",
+      "field": "payload",
+      "class": "secret",
+      "writeOnly": true
+    },
+    {
+      "table": "vault_entries",
+      "field": "stored_at",
+      "class": "internal"
+    }
+  ]
+}

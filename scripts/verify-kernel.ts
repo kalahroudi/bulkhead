@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { request } from "node:http";
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,13 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const appArg = (() => { const i = process.argv.indexOf("--app"); return i >= 0 ? process.argv[i + 1] : undefined; })();
 const demo = join(root, appArg ?? "examples/demo-app");
 const extraVars = appArg ? ["--var", `BULKHEAD_AUTH_SECRET:${randomBytes(32).toString("base64url")}`] : []; // fresh per run, like the other secrets
+// The readiness request uses the app's own tenant host suffix when it declares one (verify-target.json, DR-0016 decision 3).
+const hostSuffix: string = (() => {
+  const file = join(demo, "verify-target.json");
+  if (!existsSync(file)) return "demo.localhost";
+  const suffix = (JSON.parse(readFileSync(file, "utf8")) as { hostSuffix?: unknown }).hostSuffix; // a malformed file throws here, with its own message, instead of timing out later
+  return typeof suffix === "string" ? suffix : "demo.localhost";
+})();
 const persist = mkdtempSync(join(tmpdir(), "bulkhead-demo-state-"));
 const logDir = mkdtempSync(join(tmpdir(), "bulkhead-demo-log-"));
 // A fresh bootstrap secret per run: handed to the Worker as a var and to verify through the environment, never written to disk.
@@ -54,7 +61,7 @@ try {
     if (wrangler.exitCode !== null) throw new Error(`wrangler exited early:\n${output}`);
     if (Date.now() > deadline) throw new Error(`wrangler not ready after 90s:\n${output}`);
     const status = await new Promise<number>((resolve) => {
-      const req = request({ host: "127.0.0.1", port, path: "/whoami", headers: { host: "ready.demo.localhost" }, timeout: 3000 }, (res) => (res.resume(), resolve(res.statusCode ?? 0)));
+      const req = request({ host: "127.0.0.1", port, path: "/whoami", headers: { host: `ready.${hostSuffix}` }, timeout: 3000 }, (res) => (res.resume(), resolve(res.statusCode ?? 0)));
       req.on("error", () => resolve(0)).on("timeout", () => req.destroy());
       req.end();
     });

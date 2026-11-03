@@ -34,6 +34,19 @@ export interface Mutation {
   app?: string;
 }
 
+// Exemption (DR-0016 decisions 2 and 3): the manifest route-need guard and the TargetEnv overrides (cookie name, host suffix, webhook
+// secret) are verifier behaviour, not app code, so no catalog entry can break them (a mutation edits the app). They are covered by
+// packages/verify/test/missing-route.test.ts and target-env.test.ts. Each was shown able to fail by breaking the code by hand
+// (then restoring it), with these results:
+//   run.ts `if (missing.length)` made `if (false)`   -> missing-route "each declared route removed ..." and "a manifest that is empty ..."
+//   run.ts host built from a hard-coded demo.localhost -> target-env "a changed host suffix ...", "a changed cookie name ...", "a changed webhook secret ...", "two concurrent runs ..."
+//   run.ts webhookSecret forced to the default         -> target-env "a changed webhook secret ..."
+//   run.ts inRunScope given the default cookie name    -> target-env "a changed cookie name ..." and "two concurrent runs ..."
+//   probes.ts forged-signature `if (listed.length)` made `if (false)` -> missing-route "forged-signature: not applicable only without a manifest ..."
+//   probes.ts cookieName() no-scope throw disabled     -> target-env "a probe run outside a run scope throws ..."
+//   probes.ts no-default-role control check disabled   -> target-env "no-default-role needs a control ..."
+//   probes.ts no-default-role `needs` shortened        -> contract "each row of the doc's per-probe needs table equals ..."
+//   docs path `/summary` renamed                       -> contract "every path literal in probes.ts appears ..."
 /**
  * Probes that no catalog entry can break, each with the reason. A probe may only be listed here when its reason is
  * recorded; a new probe must otherwise arrive with a mutation entry (DR-0007 item 4, enforced in test/mutations.test.ts).
@@ -165,6 +178,8 @@ export const mutations: Mutation[] = [
       "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling",
       "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "notes-list-canary", "role-change-authority",
       "role-change-revokes", "role-matrix", "unknown-email-login-same-answer",
+      // no-default-role now signs in an owner as its control (DR-0016), so it claims the shared tenant first and session-rotation, which runs after it, finds it taken.
+      "session-rotation",
       // The CRYPTO probes all bootstrap a fresh owner tenant (or plant into shared storage), so they fail on setup for the same reason.
       "aad-transplant-fails", "nonce-uniqueness-and-rotation", "secret-write-only-readback", "shredding-makes-data-unreadable", "storage-canary-at-rest",
     ],
@@ -535,7 +550,7 @@ export const mutations: Mutation[] = [
     find: 'export const SESSION_COOKIE = "__Host-bk_session";',
     replace: 'export const SESSION_COOKIE = "bk_session";',
     // The probes look for the cookie by its __Host- name, so with another name no login yields a session and nearly every probe fails: cookie-flags among them, but not alone.
-    expect: ["aad-transplant-fails", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling", "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "nonce-uniqueness-and-rotation", "role-change-authority", "role-change-revokes", "role-matrix", "secret-write-only-readback", "session-rotation", "shredding-makes-data-unreadable", "storage-canary-at-rest", "unknown-email-login-same-answer"],
+    expect: ["aad-transplant-fails", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling", "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "no-default-role", "nonce-uniqueness-and-rotation", "role-change-authority", "role-change-revokes", "role-matrix", "secret-write-only-readback", "session-rotation", "shredding-makes-data-unreadable", "storage-canary-at-rest", "unknown-email-login-same-answer"],
   },
   {
     id: "ba-csrf-origin-ignored", rule: "AUTH-2", app: BA_APP, file: BA_AUTH,
@@ -622,7 +637,7 @@ export const mutations: Mutation[] = [
     find: "export function tenantDbAdapter(db: TenantDb) {\n  return createAdapterFactory({",
     replace: "let firstDb: TenantDb | undefined;\nexport function tenantDbAdapter(db: TenantDb) {\n  firstDb ??= db;\n  db = firstDb;\n  return createAdapterFactory({",
     // A module-level handle serves the first tenant's database to every later request; the Worker breaks wholesale, and cross-tenant-session is among the probes that notice.
-    expect: ["aad-transplant-fails", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "bootstrap-token-required", "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling", "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "nonce-uniqueness-and-rotation", "role-change-authority", "role-change-revokes", "role-matrix", "secret-write-only-readback", "session-rotation", "shredding-makes-data-unreadable", "storage-canary-at-rest", "unknown-email-login-same-answer"],
+    expect: ["aad-transplant-fails", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "bootstrap-token-required", "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling", "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "no-default-role", "nonce-uniqueness-and-rotation", "role-change-authority", "role-change-revokes", "role-matrix", "secret-write-only-readback", "session-rotation", "shredding-makes-data-unreadable", "storage-canary-at-rest", "unknown-email-login-same-answer"],
   },
   {
     id: "ba-bootstrap-guards-removed", rule: "AUTH-1", app: BA_APP, file: BA_ROUTES,

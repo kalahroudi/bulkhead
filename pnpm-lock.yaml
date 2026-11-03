@@ -173,6 +173,25 @@ importers:
         specifier: ^5.9.0
         version: 5.9.3
 
+  examples/contract-app:
+    dependencies:
+      '@kalahroudi/bulkhead-auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@kalahroudi/bulkhead-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      hono:
+        specifier: ^4.9.0
+        version: 4.13.13
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.0.0
+        version: 4.20260702.1
+      wrangler:
+        specifier: ^4.0.0
+        version: 4.149.0(@cloudflare/workers-types@4.20260702.1)(@types/node@24.19.2)
+
   examples/demo-app:
     dependencies:
       '@kalahroudi/bulkhead-auth':
