@@ -15,6 +15,9 @@ const CANARY = "CANARY-0123456789ab";
 const tmp = () => mkdtempSync(join(tmpdir(), "bulkhead-inspect-"));
 const digest = (dir: string) => readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => `${e.parentPath}/${e.name}:${createHash("sha256").update(readFileSync(join(e.parentPath, e.name))).digest("hex")}`).sort().join("\n");
 
+// The CRYPTO-5 probe declares the owner sign-in routes as needs (DR-0016 decision 2), so these stub manifests list them.
+const OWNER_ROUTES = [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }];
+
 test("inspector finds a canary in a table column, through SQL and in the bytes", () => {
   const dir = tmp();
   const db = new DatabaseSync(join(dir, "t1.sqlite"));
@@ -131,7 +134,7 @@ test("a missing manifest, or one without a secret store route, leaves CRYPTO-5 u
   try {
     const [a] = await runProbes(fx.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, {});
     assert.match(a?.unverified ?? "", /no route manifest/);
-    const [b] = await runProbes(fx.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [{ method: "GET", path: "/notes" }] });
+    const [b] = await runProbes(fx.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...OWNER_ROUTES, { method: "GET", path: "/notes" }] });
     assert.match(b?.unverified ?? "", /no POST \/secrets/);
   } finally {
     await fx.stop();
@@ -153,7 +156,7 @@ test("CRYPTO-5 never passes if a read-back route errors: a 500 hides what it wou
   await new Promise<void>((r) => stub.listen(0, "127.0.0.1", () => r()));
   const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
   try {
-    const routes = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }];
+    const routes = [...OWNER_ROUTES, { method: "POST", path: "/secrets" }, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }];
     const [clean] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes });
     assert.equal(clean?.passed, true, "control: without a 5xx route the same stub passes");
     const [r] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...routes, { method: "GET", path: "/boom" }] });
@@ -354,10 +357,10 @@ test("CRYPTO-5: a parameter route that answers 404 to every fill value was not e
   const url = new URL(`http://127.0.0.1:${(stub.address() as { port: number }).port}`);
   try {
     const base = [{ method: "POST", path: "/secrets" }, { method: "GET", path: "/secrets" }, { method: "GET", path: "/clean" }];
-    const [r] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...base, { method: "GET", path: "/secrets/:name" }] });
+    const [r] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...OWNER_ROUTES, ...base, { method: "GET", path: "/secrets/:name" }] });
     assert.equal(r?.passed, false);
     assert.match(r?.unverified ?? "", /GET \/secrets\/:name/);
-    const [ok] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: base });
+    const [ok] = await runProbes(url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...OWNER_ROUTES, ...base] });
     assert.equal(ok?.passed, true, "control: without the 404-only parameter route it passes");
     assert.match(ok?.evidence ?? "", /GET\/HEAD routes in the manifest only/);
   } finally {
@@ -399,7 +402,7 @@ test("CRYPTO-5 coverage: only the owner's answer counts, a parameter route needs
   for (const c of cases) {
     const stub = await stubTarget(c.answer);
     try {
-      const [r] = await runProbes(stub.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: c.routes });
+      const [r] = await runProbes(stub.url, [secrets], FIXTURE_BOOTSTRAP_TOKEN, { routes: [...OWNER_ROUTES, ...c.routes] });
       if (c.unverified) { assert.match(r?.unverified ?? "", c.unverified, c.name); assert.equal(r?.passed, false, c.name); }
       else { assert.equal(r?.unverified, undefined, `${c.name}: ${r?.evidence}`); assert.equal(r?.passed, true, c.name); }
     } finally {

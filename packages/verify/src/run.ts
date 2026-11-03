@@ -7,10 +7,10 @@ import { validateFinding, type Finding } from "@kalahroudi/bulkhead-spec";
 import { seededBugs } from "./bugs.ts";
 import { EventLog } from "./eventlog.ts";
 import { makeRequester } from "./http.ts";
-import { parseManifest, probes, type Context, type Probe, type TargetEnv } from "./probes.ts";
+import { DEFAULT_COOKIE_NAME, DEFAULT_HOST_SUFFIX, DEFAULT_WEBHOOK_SECRET, inRunScope, missingRoutes, parseManifest, probes, type Context, type Probe, type TargetEnv } from "./probes.ts";
 
 export const VERIFY_VERSION = "0.0.0";
-export const WEBHOOK_SECRET = "whsec_fixture";
+export const WEBHOOK_SECRET = DEFAULT_WEBHOOK_SECRET;
 /** The fixture's own bootstrap secret. Real targets supply theirs via BULKHEAD_VERIFY_BOOTSTRAP_TOKEN. */
 export const FIXTURE_BOOTSTRAP_TOKEN = "bootstrap_fixture_0123456789abcdef0123";
 export const LIMITS = "A green result means no known leak paths, not proof that none exist. Coverage measures only what has been written down.";
@@ -27,11 +27,19 @@ export interface ProbeResult {
 }
 
 export async function runProbes(target: URL, only: readonly Probe[] = probes, bootstrapToken: string | undefined = FIXTURE_BOOTSTRAP_TOKEN, env: TargetEnv = {}): Promise<ProbeResult[]> {
-  const ctx: Context = { req: makeRequester(target), host: (t) => `${t}.demo.localhost`, webhookSecret: WEBHOOK_SECRET, bootstrapToken, ...env };
+  const { cookieName = DEFAULT_COOKIE_NAME, hostSuffix = DEFAULT_HOST_SUFFIX, webhookSecret = DEFAULT_WEBHOOK_SECRET, ...rest } = env;
+  const ctx: Context = { req: makeRequester(target), host: (t) => `${t}.${hostSuffix}`, webhookSecret, cookieName, bootstrapToken, ...rest };
   const out: ProbeResult[] = [];
   for (const probe of only) {
+    // DR-0016 decision 2: a probe whose routes the target's manifest does not list has nothing to attack. It is UNVERIFIED before it sends a request, so it cannot reach an assertion.
+    const missing = missingRoutes(ctx.routes, probe.needs);
+    if (missing.length) {
+      const reason = `the route manifest lacks ${missing.join(", ")}; ${probe.id} needs ${missing.length === 1 ? "it" : "them"} to run its attack, so ${probe.ruleId} is unverified on this target`;
+      out.push({ probe, passed: false, evidence: reason, reproduction: "n/a (not run: missing route)", unverified: reason });
+      continue;
+    }
     try {
-      const v = await probe.run(ctx);
+      const v = await inRunScope(cookieName, () => probe.run(ctx));
       out.push({ probe, passed: v.passed, evidence: v.evidence, reproduction: v.reproduction, ...(v.skipped !== undefined ? { skipped: v.skipped } : {}), ...(v.unverified !== undefined ? { unverified: v.unverified } : {}) });
     } catch (e) {
       // An unreachable or crashing target is not a pass.

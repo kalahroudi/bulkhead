@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac, randomBytes } from "node:crypto";
 import type { Oracle } from "@kalahroudi/bulkhead-spec";
 import type { Requester, Response } from "./http.ts";
@@ -17,6 +18,24 @@ export interface TargetEnv {
   persistDir?: string;
   /** The committed route manifest of the target. */
   routes?: ManifestRoute[];
+  /** Name of the session cookie the target sets. Default: DEFAULT_COOKIE_NAME. */
+  cookieName?: string;
+  /** Tenant hostnames are `<tenant>.<hostSuffix>`. Default: DEFAULT_HOST_SUFFIX. */
+  hostSuffix?: string;
+  /** HMAC secret of the target's registered test billing webhook. Default: DEFAULT_WEBHOOK_SECRET. */
+  webhookSecret?: string;
+}
+
+/** Defaults equal the demo's values, byte for byte (DR-0016 decision 3). */
+export const DEFAULT_COOKIE_NAME = "__Host-bk_session";
+export const DEFAULT_HOST_SUFFIX = "demo.localhost";
+export const DEFAULT_WEBHOOK_SECRET = "whsec_fixture";
+
+/** A route a probe cannot do without: the probe is UNVERIFIED, never a pass, when the target's manifest lacks it (DR-0016 decision 2). */
+export interface RouteNeed {
+  method: string;
+  /** Path as the contract writes it, parameters as `:name`; a manifest may spell parameters `{name}`, `[name]` or `*`. */
+  path: string;
 }
 
 export function parseManifest(text: string): ManifestRoute[] {
@@ -31,6 +50,8 @@ export interface Context extends TargetEnv {
   host: (tenant: string) => string;
   /** Webhook secret for the registered test environment. */
   webhookSecret: string;
+  /** Session cookie name of the target. The module-level cookie helpers read the same value through the run scope. */
+  cookieName: string;
   /** First-owner bootstrap secret of the registered test environment. Undefined makes the auth probes fail loudly, never pass. */
   bootstrapToken: string | undefined;
 }
@@ -42,6 +63,12 @@ export interface Probe {
   ruleId: string;
   scenario: string;
   oracle: Oracle;
+  /**
+   * Manifest routes this probe cannot run without. When the target supplies a manifest and it lacks one, the run reports the
+   * probe UNVERIFIED naming the route, before the probe sends anything. Absent: the probe has its own applicability logic
+   * (see docs/verify-target-contract.md). With no manifest at all the probe runs as before.
+   */
+  needs?: readonly RouteNeed[];
   run(ctx: Context): Promise<Verdict & { reproduction: string }>;
 }
 
@@ -58,14 +85,24 @@ function requireSetup(res: Response, what: string, reproduction: string): (Verdi
 }
 
 const PASSWORD = "verify-probe-password-1";
-const SESSION_COOKIE = "__Host-bk_session";
+// The cookie name is per run (TargetEnv), and the helpers below are called from every probe body, so the run scope carries it
+// instead of threading it through ~80 call sites. AsyncLocalStorage keeps concurrent runs apart.
+const runScope = new AsyncLocalStorage<{ cookieName: string }>();
+export const inRunScope = <T>(cookieName: string, fn: () => T): T => runScope.run({ cookieName }, fn);
+const cookieName = () => {
+  const scope = runScope.getStore();
+  // No silent fallback to the demo's cookie: a probe run outside runProbes would test the wrong thing and could pass vacuously.
+  if (!scope) throw new Error("probe helper called outside a run scope (use runProbes, which sets the cookie name)");
+  return scope.cookieName;
+};
+const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const setCookies = (r: Response): string[] => [r.headers["set-cookie"] ?? []].flat();
-const sessionOf = (r: Response) => setCookies(r).map((c) => new RegExp(`^${SESSION_COOKIE}=([^;]+)`).exec(c)?.[1]).find(Boolean);
+const sessionOf = (r: Response) => setCookies(r).map((c) => new RegExp(`^${escapeRe(cookieName())}=([^;]+)`).exec(c)?.[1]).find(Boolean);
 /** Every cookie a response sets, as a request Cookie header: a library may issue more than the session token (e.g. a signed session-cache cookie), and a browser would send all of them. */
 const jarOf = (r: Response) => setCookies(r).map((c) => c.split(";")[0]!.trim()).filter((c) => /^[^=]+=.+/.test(c)).join("; ");
-const withCookie = (token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}` } });
+const withCookie = (token: string) => ({ headers: { cookie: `${cookieName()}=${token}` } });
 /** A cookie-authenticated write, with the same-origin Origin a browser always sends (the gate refuses cookie writes with neither Origin nor Sec-Fetch-Site). */
-const cookieWrite = (host: string, token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}`, origin: `http://${host}` } });
+const cookieWrite = (host: string, token: string) => ({ headers: { cookie: `${cookieName()}=${token}`, origin: `http://${host}` } });
 /** Third outcome: the target does not have the feature this probe exercises. Not a pass and never a finding. */
 const skip = (reason: string, reproduction: string) => ({ passed: false, evidence: reason, skipped: reason, reproduction });
 const fail = (evidence: string, reproduction: string) => ({ passed: false, evidence, reproduction });
@@ -87,6 +124,15 @@ const hasStoreRoute = (routes: ManifestRoute[] | undefined) => !!routes?.some((r
 const SHRED_ROUTE = "/admin/shred";
 const ROTATE_ROUTE = "/admin/rotate-key";
 const hasRoute = (routes: ManifestRoute[] | undefined, method: string, path: string) => !routes || routes.some((r) => r.method === method && r.path === path);
+/** Parameters in any manifest spelling compare equal: `/users/:id/role`, `/users/{id}/role`, `/users/[id]/role`. */
+const normalizePath = (p: string) => p.replace(PARAM_ALL, ":p");
+export const routeListed = (routes: readonly ManifestRoute[], need: RouteNeed) => routes.some((r) => r.method === need.method.toUpperCase() && normalizePath(r.path) === normalizePath(need.path));
+/** The needs a manifest does not list, as "METHOD /path". Empty when there is no manifest: the guard only applies when the target says what it has. */
+export const missingRoutes = (routes: readonly ManifestRoute[] | undefined, needs: readonly RouteNeed[] | undefined) => (routes && needs ? needs.filter((n) => !routeListed(routes, n)).map((n) => `${n.method.toUpperCase()} ${n.path}`) : []);
+/** Probes with no `needs`, each with the reason. A new probe must declare its routes or be listed here (enforced in test/missing-route.test.ts). */
+export const NO_ROUTE_NEEDS: Record<string, string> = {
+  "forged-signature": "BILL-2 has its own applicability rule: it is skipped (not applicable) when both GET /plan and POST /webhooks/billing answer 404; a manifest-based UNVERIFIED would turn every app without billing into a NOT GREEN run",
+};
 const ENVELOPE = /^bk1:([1-9][0-9]*):([A-Za-z0-9_-]{16}):([A-Za-z0-9_-]+)$/;
 const cellKey = (c: SealedCell) => `${c.file}|${c.table}|${c.column}|${c.rowid}`;
 const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
@@ -121,6 +167,7 @@ export const probes: Probe[] = [
     ruleId: "TENANT-5",
     scenario: "tenant-isolation/canary-does-not-cross",
     oracle: "canary",
+    needs: [{ method: "POST", path: "/notes" }, { method: "GET", path: "/notes" }],
     async run({ req, host }) {
       const m = marker();
       const reproduction = `Plant ${m} in tenant A via POST /notes (Host: ${host("canary-a")}). Then GET /notes with Host: ${host("canary-b")} and scan the body for the marker.`;
@@ -138,6 +185,7 @@ export const probes: Probe[] = [
     ruleId: "TENANT-5",
     scenario: "tenant-isolation/canary-does-not-cross",
     oracle: "canary",
+    needs: [{ method: "POST", path: "/notes" }, { method: "GET", path: "/summary" }],
     async run({ req, host }) {
       const m = marker();
       const reproduction = `Plant ${m} in tenant A, GET /summary as A, then GET /summary with Host: ${host("cache-b")} and scan for the marker.`;
@@ -158,6 +206,7 @@ export const probes: Probe[] = [
     ruleId: "TENANT-4",
     scenario: "tenant-isolation/adding-tenant-is-invisible",
     oracle: "metamorphic",
+    needs: [{ method: "POST", path: "/notes" }, { method: "GET", path: "/notes" }],
     async run({ req, host }) {
       const run = randomBytes(4).toString("hex");
       const a = host(`meta-a-${run}`);
@@ -183,6 +232,7 @@ export const probes: Probe[] = [
     ruleId: "TENANT-1",
     scenario: "tenant-isolation/identity-from-host-or-session-only",
     oracle: "differential",
+    needs: [{ method: "GET", path: "/whoami" }],
     async run({ req, host }) {
       const reproduction = `GET /whoami with Host: ${host("ident-b")}, then repeat it once per extra input naming tenant ident-a: headers x-tenant, x-tenant-id, x-forwarded-host, x-original-host, x-host, forwarded: host=${host("ident-a")}, and a ?tenant=ident-a query. Every response must be identical to the plain one.`;
       const plain = await req(host("ident-b"), "GET", "/whoami");
@@ -214,12 +264,17 @@ export const probes: Probe[] = [
     ruleId: "BILL-2",
     scenario: "messaging/forged-and-replayed-webhooks",
     oracle: "state", // verdict hinges on tenant state (plan) staying unchanged, plus a spec status check
-    async run({ req, host, webhookSecret }) {
+    async run({ req, host, webhookSecret, routes }) {
       const t = host("hook-a");
       const body = json({ plan: "pro" });
       const planBefore = await req(t, "GET", "/plan");
       const forged = await req(t, "POST", "/webhooks/billing", { body, headers: { "x-signature": createHmac("sha256", "not-the-secret").update(body).digest("hex") } });
       // Not applicable only when BOTH the plan route and the webhook route are absent; one 404 alone (an unprovisioned tenant host, a plan served elsewhere) proves nothing.
+      if (planBefore.status === 404 && forged.status === 404) {
+        // A manifest that lists either billing route says the target has billing: its 404s then mean the attack found nothing, which is unverified, never "not applicable".
+        const listed = (routes ?? []).filter((r) => (r.method === "GET" && r.path === "/plan") || (r.method === "POST" && r.path === "/webhooks/billing")).map((r) => `${r.method} ${r.path}`);
+        if (listed.length) return unverified(`the manifest lists ${listed.join(", ")} but GET /plan and POST /webhooks/billing both answered 404 on ${t}; BILL-2 cannot be verified on this target`, `GET /plan and a forged POST /webhooks/billing on Host: ${t} both answered 404 although the manifest lists ${listed.join(", ")}.`);
+      }
       if (planBefore.status === 404 && forged.status === 404) return skip("target has no billing routes (GET /plan and POST /webhooks/billing are both 404)", `GET /plan and a forged POST /webhooks/billing on Host: ${t} both answered 404, so the billing routes are absent and BILL-2 does not apply.`);
       const plan = await req(t, "GET", "/plan");
       const genuine = await req(t, "POST", "/webhooks/billing", { body: json({ plan: "free" }), headers: { "x-signature": createHmac("sha256", webhookSecret).update(json({ plan: "free" })).digest("hex") } });
@@ -238,9 +293,16 @@ export const probes: Probe[] = [
     ruleId: "AUTH-1",
     scenario: "auth/no-default-role",
     oracle: "differential",
-    async run({ req, host }) {
-      const h = host("authz-none");
-      const reproduction = `GET /private/member on ${h} with no credential, then with a forged session cookie, then with a forged bearer key. All three must be 401 and identical.`;
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "GET", path: "/private/member" }],
+    async run(ctx) {
+      const { req } = ctx;
+      const reproduction = "On a fresh tenant sign in an owner (control: the real session cookie must reach GET /private/member with 200). Then GET /private/member with no credential, with a forged session cookie, and with a forged bearer key. All three must be 401 and identical.";
+      // The control proves the cookie name and the route are right: otherwise a target that ignores an unknown cookie name would answer 401 to the forgery for the wrong reason.
+      const t = await ownerTenant(ctx, "authz-none", reproduction);
+      if ("error" in t && t.error) return t.error;
+      const { h, token } = t as Extract<typeof t, { h: string }>;
+      const control = await req(h, "GET", "/private/member", withCookie(token));
+      if (control.status !== 200) return fail(`control failed: the real session cookie got HTTP ${control.status} on /private/member, so the forged-cookie comparison below would prove nothing`, reproduction);
       const none = await req(h, "GET", "/private/member");
       const cookie = await req(h, "GET", "/private/member", withCookie(`bks_${"A".repeat(43)}`));
       const bearer = await req(h, "GET", "/private/member", { headers: { authorization: `Bearer bkk_${"0".repeat(16)}_${"A".repeat(43)}` } });
@@ -255,6 +317,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-2",
     scenario: "session/rotation-revocation-and-cookie-flags",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "GET", path: "/private/member" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "Log in presenting an attacker-chosen session cookie; the issued session must differ from it. Log in again presenting the first session; it must stop working.";
@@ -284,6 +347,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-2",
     scenario: "session/rotation-revocation-and-cookie-flags",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }],
     async run(ctx) {
       const reproduction = "Log in and inspect Set-Cookie: it must be Secure, HttpOnly, Path=/ and carry no Domain attribute (host-only).";
       const t = await ownerTenant(ctx, "flags", reproduction);
@@ -291,7 +355,7 @@ export const probes: Probe[] = [
       const { h, loginAs } = t as Extract<typeof t, { h: string }>;
       const login = await loginAs("owner@probe.test");
       if ("error" in login) return login.error!;
-      const cookie = setCookies(login.res).find((c) => c.startsWith(`${SESSION_COOKIE}=`)) ?? "";
+      const cookie = setCookies(login.res).find((c) => c.startsWith(`${cookieName()}=`)) ?? "";
       const attrs = cookie.split(";").slice(1).map((a) => a.trim().toLowerCase());
       return {
         ...specOracle([
@@ -310,6 +374,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-2",
     scenario: "session/rotation-revocation-and-cookie-flags",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/auth/logout" }, { method: "GET", path: "/private/member" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "Log in, GET /private/member (200), POST /auth/logout, then GET /private/member with the same cookie: it must be 401.";
@@ -334,6 +399,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-2",
     scenario: "session/rotation-revocation-and-cookie-flags",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/users" }, { method: "PATCH", path: "/users/:id/role" }, { method: "GET", path: "/private/member" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "Create a member, log them in, have the owner change their role to admin, then use the member's old cookie: it must be 401.";
@@ -364,6 +430,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-3",
     scenario: "auth/role-differential",
     oracle: "differential",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/users" }, { method: "GET", path: "/private/member" }, { method: "GET", path: "/private/admin" }, { method: "GET", path: "/private/owner" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "Sign in as owner, admin and member on one tenant and GET /private/member, /private/admin, /private/owner. Outcomes must match the route policies (member: 200/403/403, admin: 200/200/403, owner: 200/200/200).";
@@ -393,6 +460,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-4",
     scenario: "auth/api-key-scope",
     oracle: "spec",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/api-keys" }, { method: "GET", path: "/api-keys" }, { method: "GET", path: "/private/member" }, { method: "GET", path: "/private/admin" }, { method: "GET", path: "/private/owner" }],
     async run(ctx) {
       const { req, host } = ctx;
       const reproduction = "As owner, mint an admin-role key with only the private:read permission. It must reach /private/member, be refused on /private/admin (lacks the permission) and /private/owner (role), be refused on another tenant, never appear in GET /api-keys.";
@@ -433,6 +501,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-2",
     scenario: "session/rotation-revocation-and-cookie-flags",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "GET", path: "/private/member" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "Sign in on tenant A, then present tenant A's session cookie on tenant B's hostname: it must be 401. The session must keep working on tenant A.";
@@ -458,13 +527,14 @@ export const probes: Probe[] = [
     ruleId: "AUTH-2",
     scenario: "session/rotation-revocation-and-cookie-flags",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/api-keys" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "POST /api-keys with a session cookie and a cross-origin Origin (or no Origin and no Sec-Fetch-Site): the write must be 401. The same write with the tenant's own Origin, or with Sec-Fetch-Site: same-origin, must succeed (201).";
       const t = await ownerTenant(ctx, "csrf", reproduction);
       if ("error" in t && t.error) return t.error;
       const { h, token } = t as Extract<typeof t, { h: string }>;
-      const key = (csrf: Record<string, string>) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}`, ...csrf }, body: json({ name: "csrf-probe", permissions: ["self:read"] }) });
+      const key = (csrf: Record<string, string>) => ({ headers: { cookie: `${cookieName()}=${token}`, ...csrf }, body: json({ name: "csrf-probe", permissions: ["self:read"] }) });
       const crossOrigin = await req(h, "POST", "/api-keys", key({ origin: "http://evil.example" }));
       const ownOrigin = await req(h, "POST", "/api-keys", key({ origin: `http://${h}` }));
       const noHeaders = await req(h, "POST", "/api-keys", key({}));
@@ -485,6 +555,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-3",
     scenario: "auth/role-differential",
     oracle: "differential",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/users" }, { method: "GET", path: "/users" }, { method: "GET", path: "/api-keys" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "On one tenant, sign in as member, admin and owner and compare GET /users, GET /api-keys and POST /users {role:owner}. Policy says: member is refused on all three; admin may list but not grant owner; owner may do all three.";
@@ -519,6 +590,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-4",
     scenario: "auth/api-key-scope",
     oracle: "spec",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/users" }, { method: "POST", path: "/api-keys" }, { method: "DELETE", path: "/api-keys/:id" }, { method: "PATCH", path: "/users/:id/role" }, { method: "GET", path: "/private/admin" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "As owner, create an admin and mint a key as that admin. DELETE /api-keys/:id must revoke it (401). Mint a second key as the admin, have the owner demote the admin, and that key must also stop working (401).";
@@ -567,6 +639,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-2",
     scenario: "session/rotation-revocation-and-cookie-flags",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/users" }, { method: "DELETE", path: "/users/:id" }, { method: "GET", path: "/private/member" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "Create a member and log them in. Have the owner DELETE /users/:id. The member's old cookie must be 401, and a fresh POST /auth/login with the right password must be the same 401 as a wrong password.";
@@ -599,6 +672,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-4",
     scenario: "auth/api-key-scope",
     oracle: "spec",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/api-keys" }, { method: "GET", path: "/private/member" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "As owner, mint a member key with private:read. The real key reaches /private/member. Then present 'Bearer bkk_<real id>_<43 wrong base64url chars>' with a random secret and near-misses (the real secret with its first, middle or last character changed, truncated by one or to half, one character appended, a long suffix appended): each must be 401, identical to a key with an unknown id.";
@@ -644,6 +718,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-1",
     scenario: "auth/no-default-role",
     oracle: "differential",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }],
     async run({ req, host, bootstrapToken }) {
       const reproduction = "On a fresh empty tenant, POST /auth/bootstrap with a wrong token, a near-miss token (the real one with its last character changed) and no token: each must be 403 and create no user. Then the correct token (same email) must still return 201, proving the wrong attempts did not claim the tenant.";
       if (!bootstrapToken) return fail("no bootstrap token configured for this target (set BULKHEAD_VERIFY_BOOTSTRAP_TOKEN); auth probes cannot run", reproduction);
@@ -671,6 +746,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-1",
     scenario: "auth/no-default-role",
     oracle: "differential",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "GET", path: "/users" }, { method: "GET", path: "/private/owner" }],
     async run(ctx) {
       const { req, bootstrapToken } = ctx;
       const reproduction = "Bootstrap an owner on a fresh tenant. POST /auth/bootstrap again with the CORRECT token and another email: it must be 409, the first owner's session must still be owner, and GET /users must list exactly one owner and one user.";
@@ -699,6 +775,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-3",
     scenario: "auth/role-differential",
     oracle: "differential",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/users" }, { method: "GET", path: "/users" }, { method: "PATCH", path: "/users/:id/role" }, { method: "DELETE", path: "/users/:id" }, { method: "GET", path: "/private/owner" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "Create a second owner (so 'last owner' protection cannot mask anything) and an admin. As the admin, first POST /users {role:member} with the same cookie and headers (positive control, must be 201). Then PATCH /users/<admin id>/role {role:owner}, PATCH /users/<first owner id>/role {role:member} and DELETE /users/<first owner id> must each be 403. Afterwards the first owner is still an enabled owner and the admin is still an admin.";
@@ -753,6 +830,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-4",
     scenario: "auth/api-key-scope",
     oracle: "spec",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/users" }, { method: "POST", path: "/api-keys" }, { method: "GET", path: "/api-keys" }, { method: "GET", path: "/private/admin" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "As an admin, POST /api-keys {role:owner, permissions:[private:read]} must be 403 and no owner-role key may appear in GET /api-keys. An admin-role key minted by the same admin must be 201 and reach /private/admin.";
@@ -787,6 +865,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-4",
     scenario: "auth/api-key-scope",
     oracle: "spec",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/users" }, { method: "POST", path: "/api-keys" }, { method: "GET", path: "/users" }, { method: "GET", path: "/api-keys" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "As owner, create an admin and mint two keys. GET /users and GET /api-keys must be 200 and contain none of: pbkdf2, password_hash, secret_hash, password, either minted key's secret, a 64-hex-digit string, 'pbkdf2-sha256$' or a 43-character base64url token.";
@@ -833,6 +912,7 @@ export const probes: Probe[] = [
     ruleId: "AUTH-2",
     scenario: "session/rotation-revocation-and-cookie-flags",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }],
     async run(ctx) {
       const { req } = ctx;
       const reproduction = "On a tenant with an owner, POST /auth/login for an unknown email and for the owner's email with a wrong password. Both must be 401 with byte-identical bodies and set no session cookie.";
@@ -857,6 +937,7 @@ export const probes: Probe[] = [
     ruleId: "CRYPTO-1",
     scenario: "crypto/no-plaintext-at-rest",
     oracle: "canary",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/notes" }],
     async run(ctx) {
       const { req, host, persistDir } = ctx;
       const note = marker();
@@ -929,6 +1010,7 @@ export const probes: Probe[] = [
     ruleId: "CRYPTO-5",
     scenario: "crypto/tenant-secrets-write-only",
     oracle: "spec",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }],
     async run(ctx) {
       const { req, routes } = ctx;
       const m = marker();
@@ -985,6 +1067,7 @@ export const probes: Probe[] = [
     ruleId: "CRYPTO-2",
     scenario: "crypto/aad-transplant-fails",
     oracle: "spec",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/notes" }, { method: "GET", path: "/notes" }],
     async run(ctx) {
       const { req, host, persistDir } = ctx;
       const reproduction = `Tenant A (an owner): store secret S via POST /secrets, and notes N1 and N2 via POST /notes. Tenant B: store note B1. Read each stored envelope from the persisted tenant files (read-only), then, with the app still running, overwrite one cell at a time on disk: (control) A's N2 := A's N1 (same tenant, table and field), (1) A's N2 := A's secret envelope (other table), (2) B's B1 := A's N1 (other tenant), (3) B's B1 := A's secret envelope. After each, GET /notes as that tenant: the transplanted plaintext must not appear. Restore every cell afterwards.`;
@@ -1088,6 +1171,7 @@ export const probes: Probe[] = [
     ruleId: "CRYPTO-3",
     scenario: "crypto/shredding-makes-data-unreadable",
     oracle: "state",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/notes" }, { method: "GET", path: "/notes" }],
     async run(ctx) {
       const { req, host, persistDir, routes } = ctx;
       const reproduction = `Tenant A (owner): store notes C1, C2 and secret S; warm GET /summary. Tenant B stores note CB. Anonymous POST ${SHRED_ROUTE} must be refused. Then the owner shreds A via POST ${SHRED_ROUTE}. Afterwards, as anonymous and as owner, GET /notes must answer 410 and no GET route may return C1, C2, S; a new POST /notes and POST /secrets on A must not succeed (no new key may be minted) and POST ${ROTATE_ROUTE} must not succeed; tenant B must still read CB and write; a tenant that never stored anything, once shredded, must also refuse a first write. Finally scan the persisted storage for every canary.`;
@@ -1196,6 +1280,7 @@ export const probes: Probe[] = [
     ruleId: "CRYPTO-4",
     scenario: "crypto/nonce-uniqueness-and-rotation",
     oracle: "spec",
+    needs: [{ method: "POST", path: "/auth/bootstrap" }, { method: "POST", path: "/auth/login" }, { method: "POST", path: "/notes" }, { method: "GET", path: "/notes" }],
     async run(ctx) {
       const { req, persistDir, routes } = ctx;
       const reproduction = `On a fresh tenant (owner), store 24 notes and 4 secrets concurrently. Read every stored envelope from the persisted tenant file (read-only): no (keyVersion, nonce) pair may repeat. Then POST ${ROTATE_ROUTE} as the owner (an anonymous call must be refused), store 16 more notes and 2 secrets concurrently: the new envelopes must carry a higher key version, still never repeat a (keyVersion, nonce) pair of the whole tenant, and GET /notes must still return every earlier and later note.`;

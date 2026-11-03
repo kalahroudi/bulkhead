@@ -6,10 +6,11 @@ import { EventLog } from "./eventlog.ts";
 import { LIMITS, selectProbes, selfCheck, verifyTarget } from "./run.ts";
 import { parseManifest, probes, type TargetEnv } from "./probes.ts";
 import { checkTarget } from "./targets.ts";
+import { resolveTargetOverrides } from "./target-env.ts";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
-  options: { target: { type: "string" }, rules: { type: "string" }, "log-dir": { type: "string", default: ".bulkhead" }, "persist-dir": { type: "string" }, "route-manifest": { type: "string" } },
+  options: { target: { type: "string" }, rules: { type: "string" }, "log-dir": { type: "string", default: ".bulkhead" }, "persist-dir": { type: "string" }, "route-manifest": { type: "string" }, "cookie-name": { type: "string" }, "host-suffix": { type: "string" }, "webhook-secret": { type: "string" } },
 });
 const dir = values["log-dir"] as string;
 const cmd = positionals[0];
@@ -27,7 +28,7 @@ if (cmd === "selfcheck") {
   console.log(`Seeded bugs caught: ${sc.seededBugsFound}/${sc.seededBugsTotal}. Oracle ${sc.valid ? "healthy" : "INVALID"}.`);
   process.exit(sc.valid ? 0 : 1);
 } else if (cmd === "run") {
-  if (!values.target) { console.error("usage: bulkhead-verify run --target <url> [--rules TENANT-1,TENANT-5]"); process.exit(2); }
+  if (!values.target) { console.error("usage: bulkhead-verify run --target <url> [--rules TENANT-1,TENANT-5] [--persist-dir <dir>] [--route-manifest <file>] [--cookie-name <n>] [--host-suffix <s>] [--webhook-secret <s>]"); process.exit(2); }
   const target = new URL(values.target);
   const allowed = checkTarget(target, dir);
   if (!allowed.ok) { console.error(`refused: ${allowed.reason}`); process.exit(2); }
@@ -37,6 +38,7 @@ if (cmd === "selfcheck") {
   try {
     if (values["persist-dir"]) { if (!statSync(values["persist-dir"]).isDirectory()) throw new Error(`--persist-dir ${values["persist-dir"]} is not a directory`); env.persistDir = values["persist-dir"]; }
     if (values["route-manifest"]) env.routes = parseManifest(readFileSync(values["route-manifest"], "utf8"));
+    Object.assign(env, resolveTargetOverrides({ manifestPath: values["route-manifest"], cookieName: values["cookie-name"], hostSuffix: values["host-suffix"], webhookSecret: values["webhook-secret"] }));
   } catch (e) { console.error(`refused: ${(e as Error).message}`); process.exit(2); }
   const report = await verifyTarget(target, new EventLog(dir, "verify"), rules, process.env.BULKHEAD_VERIFY_BOOTSTRAP_TOKEN, env);
   if (!report.valid) { console.error("run INVALID: oracle self-check failed"); process.exit(1); }
