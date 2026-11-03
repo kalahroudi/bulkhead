@@ -27,6 +27,11 @@ export interface Mutation {
    * mutated package must fail instead, otherwise the line is unprotected and the gate fails. Naming the gap keeps it loud.
    */
   gap?: string;
+  /**
+   * Repo-relative example Worker the entry is run against (passed to verify-kernel as `--app`). Default: the shipped demo.
+   * The baseline of each app is run once and must be green before any of its entries counts.
+   */
+  app?: string;
 }
 
 /**
@@ -42,6 +47,12 @@ const ROUTES = "packages/auth/src/routes.ts";
 const KEYS = "packages/core/src/crypto/keys.ts";
 const CLASSIFICATION = "packages/core/src/crypto/classification.ts";
 const DEMO_ROUTES = "examples/demo-app/src/routes.ts";
+// DR-0011 spike: Better Auth behind the authenticate hook, served by examples/demo-betterauth and run against that app.
+const BA_APP = "examples/demo-betterauth";
+const BA_ROUTES = "packages/auth-betterauth/src/routes.ts";
+const BA_AUTH = "packages/auth-betterauth/src/authenticate.ts";
+const BA_INSTANCE = "packages/auth-betterauth/src/instance.ts";
+const BA_ADAPTER = "packages/auth-betterauth/src/adapter.ts";
 
 export const mutations: Mutation[] = [
   {
@@ -457,5 +468,300 @@ export const mutations: Mutation[] = [
     // Not a BOOT-1 check (the boot refusal is the launcher-level gate, scripts/verify-boot.ts, not claimed here): without the keys loaded the app has no
     // sealing at all, so every probe that stores or reads a sealed field fails. It shows these probes notice an app that lost its key hierarchy.
     expect: ["aad-transplant-fails", "add-tenant-metamorphic", "cache-canary", "nonce-uniqueness-and-rotation", "notes-list-canary", "secret-write-only-readback", "shredding-makes-data-unreadable", "storage-canary-at-rest"],
+  },
+  // DR-0011 spike (Better Auth). Each entry runs against examples/demo-betterauth. Entries on a single one of two overlapping
+  // defences are named gaps: the other defence shadows them over HTTP, so only a unit test in packages/auth-betterauth can kill them.
+  {
+    id: "ba-role-change-keeps-sessions", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "    await revokeSessionsOf(c, id);\n    await revokeKeysOf(c, id);\n    return c.json({ id, role: b.role });",
+    replace: "    await revokeKeysOf(c, id);\n    return c.json({ id, role: b.role });",
+    expect: ["role-change-revokes"],
+  },
+  {
+    id: "ba-role-change-keeps-keys", rule: "AUTH-4", app: BA_APP, file: BA_ROUTES,
+    find: "    await revokeSessionsOf(c, id);\n    await revokeKeysOf(c, id);\n    return c.json({ id, role: b.role });",
+    replace: "    await revokeSessionsOf(c, id);\n    return c.json({ id, role: b.role });",
+    expect: ["key-revocation"],
+  },
+  {
+    id: "ba-disable-keeps-sessions-and-check-removed", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "    await revokeSessionsOf(c, id);\n    await revokeKeysOf(c, id);\n    return c.json({ id, disabled: true });",
+    replace: "    await revokeKeysOf(c, id);\n    return c.json({ id, disabled: true });",
+    also: [{ file: BA_AUTH, find: "if (u.disabled !== 0 || !isRole(u.role)) return null;", replace: "if (!isRole(u.role)) return null;" }],
+    expect: ["disabled-user-denied"],
+  },
+  {
+    id: "ba-session-ignores-disabled", rule: "AUTH-2", app: BA_APP, file: BA_AUTH,
+    find: "if (u.disabled !== 0 || !isRole(u.role)) return null;",
+    replace: "if (!isRole(u.role)) return null;",
+    expect: [],
+    gap: "disable revokes sessions and keys first, so over HTTP this check is shadowed by revocation (defence in depth); only a unit test of authenticate can kill it",
+  },
+  {
+    id: "ba-disable-keeps-sessions", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "    await revokeSessionsOf(c, id);\n    await revokeKeysOf(c, id);\n    return c.json({ id, disabled: true });",
+    replace: "    await revokeKeysOf(c, id);\n    return c.json({ id, disabled: true });",
+    expect: [],
+    gap: "authenticate re-reads the user's disabled flag on every request, so a surviving session is still refused; only a unit test of the route can kill it",
+  },
+  {
+    id: "ba-login-ignores-disabled", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "if (!user || user.disabled !== 0) {",
+    replace: "if (!user) {",
+    expect: ["disabled-user-denied"],
+  },
+  {
+    id: "ba-cookie-cache-defers-revocation", rule: "AUTH-2", app: BA_APP, file: BA_INSTANCE,
+    find: "cookieCache: { enabled: false }",
+    replace: "cookieCache: { enabled: true, maxAge: 300 }",
+    also: [{ file: BA_AUTH, find: "auth.api.getSession({ headers: req.headers, query: { disableCookieCache: true } })", replace: "auth.api.getSession({ headers: req.headers })" }],
+    expect: ["role-change-revokes"],
+  },
+  {
+    id: "ba-cookie-not-httponly", rule: "AUTH-2", app: BA_APP, file: BA_INSTANCE,
+    find: "attributes: { httpOnly: true, secure: true,",
+    replace: "attributes: { httpOnly: false, secure: true,",
+    expect: ["cookie-flags"],
+  },
+  {
+    id: "ba-cookie-not-secure", rule: "AUTH-2", app: BA_APP, file: BA_INSTANCE,
+    find: "attributes: { httpOnly: true, secure: true,",
+    replace: "attributes: { httpOnly: true, secure: false,",
+    expect: [],
+    gap: "better-call forces Secure on any cookie named __Host-, so the explicit attribute is shadowed over HTTP; only a unit test that builds the instance and reads its cookie attributes can kill it",
+  },
+  {
+    id: "ba-cookie-loses-host-prefix", rule: "AUTH-2", app: BA_APP, file: BA_INSTANCE,
+    find: 'export const SESSION_COOKIE = "__Host-bk_session";',
+    replace: 'export const SESSION_COOKIE = "bk_session";',
+    // The probes look for the cookie by its __Host- name, so with another name no login yields a session and nearly every probe fails: cookie-flags among them, but not alone.
+    expect: ["aad-transplant-fails", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling", "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "nonce-uniqueness-and-rotation", "role-change-authority", "role-change-revokes", "role-matrix", "secret-write-only-readback", "session-rotation", "shredding-makes-data-unreadable", "storage-canary-at-rest", "unknown-email-login-same-answer"],
+  },
+  {
+    id: "ba-csrf-origin-ignored", rule: "AUTH-2", app: BA_APP, file: BA_AUTH,
+    find: "return new URL(origin).host === new URL(req.url).host;",
+    replace: "return true;",
+    expect: ["csrf-origin"],
+  },
+  {
+    id: "ba-csrf-no-header-allowed", rule: "AUTH-2", app: BA_APP, file: BA_AUTH,
+    find: 'return site === "same-origin" || site === "none";',
+    replace: 'return site === null || site === "same-origin" || site === "none";',
+    expect: ["csrf-origin"],
+  },
+  {
+    id: "ba-unknown-session-gets-default-role", rule: "AUTH-1", app: BA_APP, file: BA_AUTH,
+    find: "if (!found) return null;",
+    replace: 'if (!found) return { id: "anonymous", role: "member" };',
+    expect: ["cross-tenant-session", "disabled-user-denied", "logout-revokes", "no-default-role", "role-change-revokes", "session-rotation"],
+  },
+  {
+    id: "ba-user-created-with-default-role", rule: "AUTH-1", app: BA_APP, file: BA_INSTANCE,
+    find: "const role = slot.next;",
+    replace: 'const role = slot.next ?? "owner";',
+    expect: [],
+    gap: "no HTTP route creates a user without an explicit role, so the fallback is unreachable over HTTP; a unit test that creates a user with an empty slot must kill it",
+  },
+  {
+    id: "ba-logout-keeps-session", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "const res = await instance(c).api.signOut({ headers: c.req.headers, asResponse: true });",
+    replace: "const res = new Response(null);",
+    also: [{ file: BA_ROUTES, find: "    if (presented) {\n      await c.db.run('delete from \"session\" where token = ?', presented);\n      if (((await c.db.query<{ n: number }>('select count(*) as n from \"session\" where token = ?', presented))[0]?.n ?? 1) !== 0) throw new Error(\"session survived logout\");\n    }\n", replace: "" }],
+    // Two independent defences (signOut, and the explicit delete that follows it) must both go.
+    expect: ["logout-revokes"],
+  },
+  {
+    id: "ba-logout-explicit-delete-removed", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "    if (presented) {\n      await c.db.run('delete from \"session\" where token = ?', presented);\n      if (((await c.db.query<{ n: number }>('select count(*) as n from \"session\" where token = ?', presented))[0]?.n ?? 1) !== 0) throw new Error(\"session survived logout\");\n    }\n",
+    replace: "",
+    expect: [],
+    gap: "Better Auth's signOut deletes the session itself, so the explicit delete and survival check are shadowed over HTTP; killed by gaps.test.ts 'logout is a 500, not a 200, when the session could not be removed'",
+  },
+  {
+    id: "ba-logout-signout-skipped", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "const res = await instance(c).api.signOut({ headers: c.req.headers, asResponse: true });",
+    replace: "const res = new Response(null);",
+    expect: [],
+    gap: "the explicit delete still revokes the session, so only the cookie-clearing Set-Cookie from signOut is lost, which no probe checks; killed by gaps.test.ts 'ba-logout-keeps-session: logout clears the cookie in the response and removes the session row'",
+  },
+  {
+    id: "ba-login-unknown-email-distinguishable", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: '      await c.db.run("insert into login_attempts (email, at) values (?, ?)", email, now);\n      return bad();\n    }\n    // Rotation',
+    replace: '      await c.db.run("insert into login_attempts (email, at) values (?, ?)", email, now);\n      return c.json({ error: "no such user" }, 401);\n    }\n    // Rotation',
+    expect: ["unknown-email-login-same-answer"],
+  },
+  {
+    id: "ba-login-unknown-email-skips-dummy-hash", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "      await verifyPassword(b.password, null); // the same work as a real check, so timing does not separate the cases\n",
+    replace: "",
+    expect: [],
+    gap: "the dummy hash only equalises timing, which no black-box probe measures; a unit test must assert the unknown-email branch calls verifyPassword",
+  },
+  {
+    id: "ba-login-lockout-removed", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: 'if (n >= MAX_FAILED_LOGINS) return c.json({ error: "too many attempts" }, 429);',
+    replace: "",
+    expect: [],
+    gap: "no probe drives repeated failed logins; a unit test must assert the sixth attempt inside the window is refused",
+  },
+  {
+    id: "ba-login-no-rotation", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "    if (presented) await c.db.run('delete from \"session\" where token = ?', presented);\n    await c.db.run(\"delete from login_attempts",
+    replace: "    await c.db.run(\"delete from login_attempts",
+    expect: ["session-rotation"],
+  },
+  {
+    id: "ba-adapter-where-dropped", rule: "TENANT-1", app: BA_APP, file: BA_ADAPTER,
+    find: "return { sql: ` where ${groups.join(\" and \")}`, params: [...ands, ...ors].flatMap((p) => p.p) };",
+    replace: "return { sql: \"\", params: [] };",
+    // Every lookup by id or email then returns the first row of the table (writes are refused by writeWhere only when the list is empty, not when the SQL is), so identity-dependent probes fail broadly.
+    expect: ["authority-matrix", "cross-tenant-session", "disabled-user-denied", "key-revocation", "key-role-ceiling", "listings-hide-secrets", "role-change-authority", "role-change-revokes", "role-matrix", "session-rotation"],
+  },
+  {
+    id: "ba-adapter-handle-shared-across-requests", rule: "TENANT-1", app: BA_APP, file: BA_ADAPTER,
+    find: "export function tenantDbAdapter(db: TenantDb) {\n  return createAdapterFactory({",
+    replace: "let firstDb: TenantDb | undefined;\nexport function tenantDbAdapter(db: TenantDb) {\n  firstDb ??= db;\n  db = firstDb;\n  return createAdapterFactory({",
+    // A module-level handle serves the first tenant's database to every later request; the Worker breaks wholesale, and cross-tenant-session is among the probes that notice.
+    expect: ["aad-transplant-fails", "api-key-scope", "authority-matrix", "bootstrap-claims-once", "bootstrap-token-required", "cookie-flags", "cross-tenant-session", "csrf-origin", "disabled-user-denied", "key-revocation", "key-role-ceiling", "key-wrong-secret-denied", "listings-hide-secrets", "logout-revokes", "nonce-uniqueness-and-rotation", "role-change-authority", "role-change-revokes", "role-matrix", "secret-write-only-readback", "session-rotation", "shredding-makes-data-unreadable", "storage-canary-at-rest", "unknown-email-login-same-answer"],
+  },
+  {
+    id: "ba-bootstrap-guards-removed", rule: "AUTH-1", app: BA_APP, file: BA_ROUTES,
+    find: "    if (((await c.db.query<{ n: number }>('select count(*) as n from \"user\"'))[0]?.n ?? 0) > 0) return c.json({ error: \"tenant already has users\" }, 409);\n",
+    replace: "",
+    also: [{ file: BA_ROUTES, find: " and (select count(*) from \"user\") = 1', id);", replace: "', id);" }],
+    // Two overlapping defences: the pre-check on the user count and the count guard on the claiming update.
+    expect: ["bootstrap-claims-once"],
+  },
+  {
+    id: "ba-bootstrap-precheck-removed", rule: "AUTH-1", app: BA_APP, file: BA_ROUTES,
+    find: "    if (((await c.db.query<{ n: number }>('select count(*) as n from \"user\"'))[0]?.n ?? 0) > 0) return c.json({ error: \"tenant already has users\" }, 409);\n",
+    replace: "",
+    expect: [],
+    gap: "the guarded claiming update discards a second claimant again, so the pre-check is shadowed over HTTP; killed by gaps.test.ts 'ba-bootstrap-precheck-removed: a second claim is refused before any second user is written'",
+  },
+  {
+    id: "ba-bootstrap-postcheck-removed", rule: "AUTH-1", app: BA_APP, file: BA_ROUTES,
+    find: " and (select count(*) from \"user\") = 1', id);",
+    replace: "', id);",
+    expect: [],
+    gap: "the pre-check refuses a sequential second claimant first; the count guard exists for races, which a sequential black-box probe cannot produce; killed by gaps.test.ts 'ba-bootstrap-postcheck-removed: two claims racing leave at most one user, never two owners'",
+  },
+  {
+    id: "ba-bootstrap-token-unchecked", rule: "AUTH-1", app: BA_APP, file: BA_ROUTES,
+    find: "|| !safeEqual(b.token, secret)) return c.json({ error: \"forbidden\" }, 403);",
+    replace: ") return c.json({ error: \"forbidden\" }, 403);",
+    expect: ["bootstrap-token-required"],
+  },
+  {
+    id: "ba-role-patch-above-own-role", rule: "AUTH-3", app: BA_APP, file: BA_ROUTES,
+    find: "    if (rank(b.role) > rank(c.user!.role)) return c.json({ error: \"cannot grant a role above your own\" }, 403);\n    const refused = await guardTarget(c, id, b.role !== \"owner\");",
+    replace: "    const refused = await guardTarget(c, id, b.role !== \"owner\");",
+    expect: ["role-change-authority"],
+  },
+  {
+    id: "ba-guard-target-above-own-role", rule: "AUTH-3", app: BA_APP, file: BA_ROUTES,
+    find: "if (rank(target.role) > rank(c.user!.role)) return c.json({ error: \"cannot modify a user above your own role\" }, 403);",
+    replace: "",
+    expect: ["role-change-authority"],
+  },
+  {
+    id: "ba-grant-above-own-role", rule: "AUTH-3", app: BA_APP, file: BA_ROUTES,
+    find: '    if (rank(b.role) > rank(c.user!.role)) return c.json({ error: "cannot grant a role above your own" }, 403);\n    const made = await createUser(',
+    replace: "    const made = await createUser(",
+    expect: ["authority-matrix"],
+  },
+  {
+    id: "ba-key-minted-above-own-role", rule: "AUTH-4", app: BA_APP, file: BA_ROUTES,
+    find: "if (rank(role) > rank(c.user!.role)) return c.json({ error: \"cannot mint a key above your own role\" }, 403);",
+    replace: "",
+    expect: ["key-role-ceiling"],
+  },
+  {
+    id: "ba-key-delete-noop", rule: "AUTH-4", app: BA_APP, file: BA_ROUTES,
+    find: '"update api_keys set revoked_at = ? where id = ? and revoked_at is null"',
+    replace: '"update api_keys set revoked_at = revoked_at where id = ? and ? is not null and revoked_at is null"',
+    expect: ["key-revocation"],
+  },
+  {
+    id: "ba-key-list-leaks-secret-hash", rule: "AUTH-4", app: BA_APP, file: BA_ROUTES,
+    find: 'select id, name, role, permissions, created_by, created_at, expires_at, revoked_at from api_keys',
+    replace: 'select id, name, role, permissions, created_by, created_at, expires_at, revoked_at, secret_hash from api_keys',
+    expect: ["listings-hide-secrets"],
+  },
+  {
+    id: "ba-key-revoked-check-removed", rule: "AUTH-4", app: BA_APP, file: BA_AUTH,
+    find: "where k.id = ? and k.revoked_at is null and (k.expires_at is null or k.expires_at > ?)",
+    replace: "where k.id = ? and (k.expires_at is null or k.expires_at > ?)",
+    expect: ["key-revocation"],
+  },
+  {
+    id: "ba-key-expiry-check-removed", rule: "AUTH-4", app: BA_APP, file: BA_AUTH,
+    find: "where k.id = ? and k.revoked_at is null and (k.expires_at is null or k.expires_at > ?)",
+    replace: "where k.id = ? and k.revoked_at is null and ? is not null",
+    expect: [],
+    gap: "no probe mints an expiring key and waits it out; a unit test with a past expires_at must kill it",
+  },
+  {
+    id: "ba-key-secret-not-compared", rule: "AUTH-4", app: BA_APP, file: BA_AUTH,
+    find: "if (!row || !ok || row.user_disabled",
+    replace: "if (!row || row.user_disabled",
+    expect: ["key-wrong-secret-denied"],
+  },
+  {
+    id: "ba-key-ignores-disabled", rule: "AUTH-4", app: BA_APP, file: BA_AUTH,
+    find: "row.user_disabled !== 0 || ",
+    replace: "",
+    expect: [],
+    gap: "disable revokes sessions and keys first, so over HTTP this check is shadowed by revocation (defence in depth); only a unit test of authenticate can kill it",
+  },
+  {
+    id: "ba-key-role-not-capped-by-owner", rule: "AUTH-4", app: BA_APP, file: BA_AUTH,
+    find: "const role = ROLE_VALUES.indexOf(row.role) <= ROLE_VALUES.indexOf(row.user_role) ? row.role : row.user_role;",
+    replace: "const role = row.role;",
+    expect: [],
+    gap: "a role change revokes the user's keys, so a key outliving a demotion cannot be built over HTTP; only a unit test of authenticate can kill it",
+  },
+  {
+    id: "ba-writes-without-condition-allowed", rule: "TENANT-1", app: BA_APP, file: BA_ADAPTER,
+    find: "if (!where || where.length === 0) throw new Error(\"refusing a write with an empty where clause\");",
+    replace: "",
+    expect: [],
+    gap: "Better Auth does not issue a write without a condition over HTTP; killed by gaps.test.ts 'the adapter refuses a write with no condition'",
+  },
+  {
+    id: "ba-adapter-or-joined-into-and", rule: "TENANT-1", app: BA_APP, file: BA_ADAPTER,
+    find: "  const ands = parts.filter((p) => !p.or);\n  const ors = parts.filter((p) => p.or);",
+    replace: "  const ands = parts;\n  const ors: typeof parts = [];",
+    expect: [],
+    gap: "no route builds a query with OR clauses, so grouping is invisible over HTTP; killed by gaps.test.ts 'the adapter groups (every AND clause) AND (any OR clause), like Better Auth's own adapters'",
+  },
+  {
+    id: "ba-signup-failure-keeps-partial-user", rule: "AUTH-1", app: BA_APP, file: BA_ROUTES,
+    find: "      if (partial) await discardUser(c, partial.id);\n",
+    replace: "",
+    expect: [],
+    gap: "a sign-up that fails halfway cannot be provoked over HTTP; killed by gaps.test.ts 'a sign-up that fails halfway leaves no partial user: bootstrap is a 500, then a retry succeeds'",
+  },
+  {
+    id: "ba-signup-invalid-is-not-400", rule: "AUTH-1", app: BA_APP, file: BA_ROUTES,
+    find: "      if ((e as { status?: unknown; statusCode?: unknown }).statusCode === 400) return { error: \"invalid\" };\n",
+    replace: "",
+    expect: [],
+    gap: "the routes validate email and password before Better Auth, so Better Auth's own 400 is unreachable over HTTP; killed by gaps.test.ts 'an email Better Auth rejects is a 400, not a conflict'",
+  },
+  {
+    id: "ba-token-decode-unguarded", rule: "AUTH-2", app: BA_APP, file: BA_ROUTES,
+    find: "  try { return decodeURIComponent(cookie).split(\".\")[0] || null; } catch { return null; } // a malformed escape is no session, not a 500",
+    replace: "  return decodeURIComponent(cookie).split(\".\")[0] || null;",
+    expect: [],
+    gap: "no probe sends a malformed percent-escape in the session cookie; killed by gaps.test.ts 'a malformed cookie escape on login is not a server error'",
+  },
+  {
+    id: "ba-signup-existing-email-precheck-removed", rule: "AUTH-1", app: BA_APP, file: BA_ROUTES,
+    find: "    if ((await c.db.query('select 1 from \"user\" where email = ?', email)).length > 0) return { error: \"exists\" };\n",
+    replace: "",
+    // provisional expect, set from the run
+    expect: [],
+    gap: "Better Auth answers a duplicate email with a made-up user and the row check afterwards still reports it as taken, so the pre-check is shadowed over HTTP; killed by gaps.test.ts 'ba-signup-existing-email-precheck-removed: a taken email is refused before Better Auth runs'",
   },
 ];

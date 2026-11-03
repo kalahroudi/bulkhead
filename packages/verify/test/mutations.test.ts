@@ -34,6 +34,14 @@ test("each find string occurs exactly once in the real source file", () => {
   }
 });
 
+test("an entry's app is an existing example Worker with a wrangler config", () => {
+  for (const m of mutations) if (m.app !== undefined) {
+    assert.match(m.app, /^examples\/[A-Za-z0-9._-]+$/, `${m.id}: app must be a repo-relative examples/<name> directory`);
+    assert.ok(existsSync(repo + m.app), `${m.id}: ${m.app} does not exist`);
+    assert.ok(existsSync(repo + m.app + "/wrangler.jsonc") || existsSync(repo + m.app + "/wrangler.toml"), `${m.id}: ${m.app} has no wrangler config`);
+  }
+});
+
 test("DR-0007 item 4: every probe is broken by some catalog entry, or is exempted with a reason", () => {
   const covered = new Set(mutations.flatMap((m) => m.expect));
   for (const p of probes) {

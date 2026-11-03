@@ -61,6 +61,8 @@ const PASSWORD = "verify-probe-password-1";
 const SESSION_COOKIE = "__Host-bk_session";
 const setCookies = (r: Response): string[] => [r.headers["set-cookie"] ?? []].flat();
 const sessionOf = (r: Response) => setCookies(r).map((c) => new RegExp(`^${SESSION_COOKIE}=([^;]+)`).exec(c)?.[1]).find(Boolean);
+/** Every cookie a response sets, as a request Cookie header: a library may issue more than the session token (e.g. a signed session-cache cookie), and a browser would send all of them. */
+const jarOf = (r: Response) => setCookies(r).map((c) => c.split(";")[0]!.trim()).filter((c) => /^[^=]+=.+/.test(c)).join("; ");
 const withCookie = (token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}` } });
 /** A cookie-authenticated write, with the same-origin Origin a browser always sends (the gate refuses cookie writes with neither Origin nor Sec-Fetch-Site). */
 const cookieWrite = (host: string, token: string) => ({ headers: { cookie: `${SESSION_COOKIE}=${token}`, origin: `http://${host}` } });
@@ -342,9 +344,11 @@ export const probes: Probe[] = [
       if ("error" in added) return added.error!;
       const m = await loginAs("m@probe.test");
       if ("error" in m) return m.error!;
-      const before = await req(h, "GET", "/private/member", withCookie(m.token));
+      // The whole cookie jar is replayed, as a browser would: a cache cookie must not let a revoked session through.
+      const jar = { headers: { cookie: jarOf(m.res) } };
+      const before = await req(h, "GET", "/private/member", jar);
       const changed = await req(h, "PATCH", `/users/${added.id}/role`, { ...cookieWrite(h, token), body: json({ role: "admin" }) });
-      const after = await req(h, "GET", "/private/member", withCookie(m.token));
+      const after = await req(h, "GET", "/private/member", jar);
       return {
         ...specOracle([
           { name: "member session worked", ok: before.status === 200, detail: `HTTP ${before.status}` },

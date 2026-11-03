@@ -31,8 +31,8 @@ const SECRET_FILES = /\/(\.dev\.vars|\.env(\.[^/]*)?|\.npmrc|[^/]*\.(pem|key))$/
 cpSync(root, scratch, { recursive: true, verbatimSymlinks: true, filter: (src) => { const rel = src.slice(root.length - 1); return !/\/(\.git|\.bulkhead|\.wrangler)(\/|$)/.test(rel) && !SECRET_FILES.test(rel); } });
 
 /** Runs verify against the scratch copy; returns the failing probe ids, or an error string when the run itself broke. */
-function runVerify(): { failed: string[] } | { error: string } {
-  const r = spawnSync(process.execPath, [join(scratch, "scripts/verify-kernel.ts"), "--rules", RULES], { cwd: scratch, encoding: "utf8", timeout: 400_000 });
+function runVerify(app?: string): { failed: string[] } | { error: string } {
+  const r = spawnSync(process.execPath, [join(scratch, "scripts/verify-kernel.ts"), "--rules", RULES, ...(app ? ["--app", app] : [])], { cwd: scratch, encoding: "utf8", timeout: 400_000 });
   const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   const lines = out.split("\n");
   const results = lines.filter((l) => /^(pass|FAIL) [A-Z]+-\d+ /.test(l));
@@ -54,12 +54,20 @@ let bad = 0;
 const report = (ok: boolean, msg: string) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) bad++; };
 
 try {
-  const base = runVerify();
-  if ("error" in base) { report(false, `baseline: ${base.error}`); }
-  else if (base.failed.length) { report(false, `baseline already fails [${base.failed}], mutation results would be meaningless`); }
-  else {
-    report(true, "baseline: unmutated copy passes every probe");
+  // An entry may name another example Worker (`app`, the DR-0011 spike). Each app that is used gets its own baseline, and an app whose
+  // baseline fails has all of its entries reported as problems, never run.
+  const apps = [...new Set(selected.map((m) => (m as Mutation & { app?: string }).app))];
+  const baselineOk = new Map<string | undefined, boolean>();
+  for (const app of apps) {
+    const base = runVerify(app);
+    const label = app ?? "default demo";
+    if ("error" in base) report(false, `baseline (${label}): ${base.error}`);
+    else if (base.failed.length) report(false, `baseline (${label}) already fails [${base.failed}], mutation results would be meaningless`);
+    else { report(true, `baseline (${label}): unmutated copy passes every probe`); baselineOk.set(app, true); }
+  }
+  {
     for (const m of selected) {
+      if (!baselineOk.get((m as Mutation & { app?: string }).app)) { report(false, `${m.id}: not run, its baseline failed`); continue; }
       const edits: Edit[] = [{ file: m.file, find: m.find, replace: m.replace }, ...(m.also ?? [])];
       const originals = new Map(edits.map((e) => [e.file, readFileSync(join(scratch, e.file), "utf8")]));
       // Edits are applied in order and each find must match exactly once in the text as it is at that moment, so a later edit
@@ -77,7 +85,7 @@ try {
       // Each `find` must match exactly once in the file as it stands before any edit, so none can be silently inert.
       if (planError) { report(false, `${m.id}: ${planError}`); continue; }
       apply();
-      const res = runVerify();
+      const res = runVerify((m as Mutation & { app?: string }).app);
       restore();
       if ("error" in res) { report(false, `${m.id}: ${res.error}`); continue; }
       if (m.gap) {
